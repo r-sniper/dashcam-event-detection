@@ -1,0 +1,3 @@
+#[HEAD]gps_timestamp_utc,latitude_deg,longitude_deg,speed_kmh,heading_deg
+#[IF] $GPSDateTime
+$GPSDateTime,$GPSLatitude,$GPSLongitude,$GPSSpeed,$GPSTrack

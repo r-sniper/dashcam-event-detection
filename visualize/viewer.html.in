@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashcam event review</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f4f5f2;color:#152623;font:15px Inter,"Segoe UI",sans-serif}
+main{max-width:1360px;margin:auto;padding:30px}h1{font-size:30px;letter-spacing:-.04em;margin:0 0 6px}
+header p,small{color:#536660}section{display:grid;grid-template-columns:minmax(250px,360px) minmax(0,1fr);gap:22px}
+aside,article{min-width:0;background:white;border:1px solid #d3ded9;border-radius:8px;padding:14px}
+label,select,button{font:inherit}select,button,.load{border:1px solid #bdccc6;border-radius:5px;background:#fff;color:inherit;padding:6px 9px}
+.load{display:inline-block;cursor:pointer}.load input{display:none}select{width:100%;margin:6px 0 12px}
+ul{list-style:none;padding:0;margin:0;max-height:61vh;overflow:auto}li button{width:100%;text-align:left;cursor:pointer;border:0;border-top:1px solid #e6ece8;border-radius:0;padding:9px}
+li button[aria-current=true]{background:#dceee7}li small{display:block;margin-top:4px;font-family:Consolas,monospace}
+.frame{position:relative;line-height:0;background:#121714;aspect-ratio:16/9}video{width:100%;height:100%;object-fit:contain}
+#box{position:absolute;border:2px solid #ffdc64;pointer-events:none}#name{font-family:Consolas,monospace;overflow-wrap:anywhere}
+article footer{display:flex;align-items:center;gap:10px;flex-wrap:wrap}#status{color:#904316}button:focus-visible,select:focus-visible{outline:2px solid #007b56}
+@media(max-width:760px){main{padding:14px}section{display:flex;flex-direction:column-reverse}ul{max-height:36vh}}
+</style>
+<main><header><h1>Dashcam event review</h1><p id="summary"></p></header>
+<section><aside><label for="kind">Show</label><select id="kind"></select><ul id="list"></ul></aside>
+<article><div class="frame"><video id="video" controls preload="metadata"></video><div id="box" hidden></div></div>
+<p id="name"></p><p id="detail"></p><footer><button id="jump">Jump to event</button>
+<label class="load">Locate video files<input type="file" accept="video/*,.mp4" multiple id="files"></label></footer>
+<p id="status" role="status"></p></article></section></main>
+<script>
+const data=/*DATA*/null;
+const el=id=>document.getElementById(id);
+const video=el("video"), box=el("box"), local=new Map();
+const labels={speedbreaker:"Speedbreaker",manual_window:"Manual window",possible_speedbreaker_sign:"Possible speedbreaker sign",possible_rough_road_sign:"Possible hump or rough road sign",warning_sign_candidate:"Possible warning sign",hit:"Matched",miss:"Missed",unscored:"Unscored","unmatched prediction":"Outside manual windows"};
+const label=k=>labels[k]||k;
+const stamp=s=>Math.floor(s/60)+":"+String(Math.floor(s%60)).padStart(2,"0")+"."+Math.floor((s%1)*10+0.0001);
+let active=null, pending=null, source="";
+function jump(t){if(video.readyState>=1)video.currentTime=Math.min(t,video.duration||t);else pending=t}
+video.onloadedmetadata=()=>{if(pending!==null){video.currentTime=pending;pending=null}};
+video.onerror=()=>{el("status").textContent="Open this HTML locally or use Locate video files to select the original MP4s."};
+video.ontimeupdate=()=>{box.hidden=!active?.box || Math.abs(video.currentTime-active.t)>.55};
+function select(row,btn){
+ active=row;document.querySelector('#list [aria-current="true"]')?.removeAttribute("aria-current");btn?.setAttribute("aria-current","true");
+ el("name").textContent=row.filename;el("status").textContent="";
+ const score=row.score!==""?"Score "+Number(row.score).toFixed(2):"";
+ const speed=row.speed!==null&&row.speed!==""?row.speed+" km/h":"";
+ el("detail").textContent=[label(row.event), row.range?row.range+" s":stamp(row.t),score,speed,label(row.result)].filter(Boolean).join("  ·  ");
+ const uri=local.get(row.filename)||row.url;
+ if(source!==uri){video.pause();source=uri;pending=null;video.src=uri;video.load()}
+ if(row.box){const [x,y,w,h]=row.box.split(",").map(Number);Object.assign(box.style,{left:x*100+"%",top:y*100+"%",width:w*100+"%",height:h*100+"%"})}
+ box.hidden=true;jump(Math.max(0,row.t-(row.box?0:3)));
+}
+function render(){
+ const rows=data.entries.filter(r=>!el("kind").value||r.event===el("kind").value||r.result===el("kind").value);
+ const list=el("list");list.replaceChildren();
+ for(const row of rows){const li=document.createElement("li"),btn=document.createElement("button"),sm=document.createElement("small");
+ btn.textContent=stamp(row.t)+"  "+label(row.event);sm.textContent=row.filename;btn.append(sm);btn.onclick=()=>select(row,btn);li.append(btn);list.append(li)}
+ if(rows.length)select(rows[0],list.querySelector("button"));
+}
+el("summary").textContent=data.clips+" clips  ·  "+data.entries.filter(r=>r.event!=="manual_window").length+" detections";
+for(const val of ["",...new Set(data.entries.flatMap(r=>[r.event,r.result]).filter(Boolean))])el("kind").add(new Option(val?label(val):"All entries",val));
+if(data.entries.some(r=>r.event==="speedbreaker"))el("kind").value="speedbreaker";
+if(!data.entries.length){el("jump").disabled=true;el("status").textContent="No detections in these clips."}
+el("kind").onchange=render;el("jump").onclick=()=>{if(active)jump(active.t)};
+el("files").onchange=e=>{for(const f of e.target.files){if(local.has(f.name))URL.revokeObjectURL(local.get(f.name));local.set(f.name,URL.createObjectURL(f))}if(active)select(active,document.querySelector('#list [aria-current="true"]'))};render();
+</script></html>

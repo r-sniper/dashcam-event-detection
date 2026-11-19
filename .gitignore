@@ -1,0 +1,16 @@
+# Local recordings, telemetry, and generated review files
+/videos/
+/analysis/
+/annotation/
+/visualize/*.html
+*.mp4
+*.MP4
+*.telemetry.csv
+*.telemetry.json
+
+# Local working directories and Python caches
+/.speedbreaker-work/
+/.idea/
+/.venv/
+__pycache__/
+*.py[cod]
