@@ -1,5 +1,15 @@
+from collections.abc import Iterable
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
+
+
+class DetectorName(str, Enum):
+    SPEEDBREAKER = "speedbreaker"
+    WARNING_SIGN = "warning_sign"
+
+    def __str__(self) -> str:
+        return self.value
 
 
 @dataclass
@@ -15,7 +25,7 @@ class Detection:
 
 class FrontClips:
     @staticmethod
-    def resolve(inputs):
+    def resolve(inputs: Iterable[str | Path]) -> list[Path]:
         clips = {}
         for item in inputs:
             path = Path(item)

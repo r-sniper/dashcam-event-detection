@@ -1,12 +1,16 @@
 """Optional visual candidates for upright Indian triangular warning signs."""
 
 import subprocess
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from pathlib import Path
+from typing import BinaryIO, cast
 
 import cv2
 import numpy as np
+from numpy.typing import NDArray
 
-from .common import Detection
+from .common import Detection, DetectorName
 
 
 @dataclass
@@ -19,11 +23,11 @@ class SignTrack:
 
 
 class WarningSignDetector:
-    name = "warning_sign"
+    name = DetectorName.WARNING_SIGN
     width, height, fps = 960, 540, 2
 
     @staticmethod
-    def classify_face(face):
+    def classify_face(face: NDArray[np.uint8]) -> tuple[str, float]:
         # Extract the central glyph before comparing its silhouette. Its printed
         # size and baseline position vary considerably between roadside signs.
         yy, xx = np.mgrid[:64, :64]
@@ -48,11 +52,12 @@ class WarningSignDetector:
                                 ("possible_rough_road_sign", [-.47, .47])]:
             error = 1.
             for width in (.38, .53, .70):
-                arch = np.maximum.reduce([np.sqrt(np.maximum(0, 1 - ((axis-c)/width)**2)) for c in centers])
+                arches = np.stack([np.sqrt(np.maximum(0, 1 - ((axis-c)/width)**2)) for c in centers])
+                arch = arches.max(axis=0)
                 for base in (.12, .30, .45):
                     error = min(error, float(np.abs(profile - (base + (1-base)*arch)).mean()))
             best[symbol] = 1 - error
-        symbol = max(best, key=best.get)
+        symbol = max(best, key=best.__getitem__)
         # A flat rectangle or an unresolved pictogram is only a generic warning.
         middle = profile[18:23].mean()
         sides = min(profile[7:15].max(), profile[26:34].max())
@@ -62,7 +67,7 @@ class WarningSignDetector:
             return "warning_sign_candidate", 0.
         return symbol, best[symbol]
 
-    def candidates(self, frame, t):
+    def candidates(self, frame: NDArray[np.uint8], t: float) -> Iterator[tuple[float, float, Detection]]:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         h, s, v = cv2.split(hsv)
         red = ((h < 12) | (h > 168)) & (s > 70) & (v > 55)
@@ -82,9 +87,9 @@ class WarningSignDetector:
             left, right = sorted(base, key=lambda pt: pt[0])
             if not (left[0] + .18*w < top[0] < right[0] - .18*w and abs(right[1]-left[1]) < .28*h):
                 continue
-            matrix = cv2.getAffineTransform(np.float32([top, left, right]),
-                                            np.float32([[32, 1], [1, 62], [62, 62]]))
-            face = cv2.warpAffine(frame, matrix, (64, 64))
+            matrix = cv2.getAffineTransform(np.asarray([top, left, right], dtype=np.float32),
+                                            np.asarray([[32, 1], [1, 62], [62, 62]], dtype=np.float32))
+            face = cast(NDArray[np.uint8], cv2.warpAffine(frame, matrix, (64, 64)))
             inner = cv2.cvtColor(face[30:49, 24:40], cv2.COLOR_BGR2HSV)
             if ((inner[:, :, 1] < 85) & (inner[:, :, 2] > 100)).mean() < .50:
                 continue
@@ -93,7 +98,7 @@ class WarningSignDetector:
             yield (x + w/2)/self.width, (y + h/2)/self.height, Detection(label, t, round(similarity, 3), box=box)
 
     @staticmethod
-    def approaches(crossings, duration, lookback):
+    def approaches(crossings: Iterable[Detection], duration: float, lookback: float) -> list[tuple[float, float]]:
         windows = []
         for event in sorted(crossings, key=lambda e: e.peak_s):
             start = max(0., np.floor((event.peak_s-lookback)*2)/2)
@@ -104,7 +109,7 @@ class WarningSignDetector:
                 windows.append((start, end))
         return windows
 
-    def scan_window(self, video, start, end):
+    def scan_window(self, video: Path, start: float, end: float) -> list[Detection]:
         command = ["ffmpeg", "-v", "error", "-nostdin", "-threads", "3", "-ss", str(start),
                    "-i", str(video), "-t", str(end-start), "-an",
                    "-vf", f"fps={self.fps}:round=up,scale={self.width}:{self.height}:flags=fast_bilinear",
@@ -112,7 +117,8 @@ class WarningSignDetector:
         tracks = []
         with subprocess.Popen(command, stdout=subprocess.PIPE) as process:
             index = 0
-            while data := process.stdout.read(self.width * self.height * 3):
+            frames = cast(BinaryIO, process.stdout)
+            while data := frames.read(self.width * self.height * 3):
                 frame = np.frombuffer(data, np.uint8).reshape(self.height, self.width, 3)
                 t = start + index / self.fps
                 for x, y, event in self.candidates(frame, t):
@@ -131,7 +137,8 @@ class WarningSignDetector:
                 raise RuntimeError(f"FFmpeg could not finish the sign scan of {video}")
         return [tr.best for tr in tracks if tr.count >= 2]
 
-    def detect(self, video, duration, windows=None):
+    def detect(self, video: Path, duration: float,
+               windows: list[tuple[float, float]] | None = None) -> tuple[list[Detection], float]:
         if windows is None:
             windows = [(0., duration)]
         events = [e for start, end in windows for e in self.scan_window(video, start, end)]

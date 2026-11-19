@@ -4,17 +4,20 @@ import argparse
 import csv
 import json
 from collections import defaultdict
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 
 class ReviewPage:
     @staticmethod
-    def read(path):
+    def read(path: str | Path) -> list[dict[str, str]]:
         with Path(path).open(encoding="utf-8-sig", newline="") as f:
             return list(csv.DictReader(f))
 
     @classmethod
-    def write(cls, path, events, clips, annotations=()):
+    def write(cls, path: Path, events: Iterable[Mapping[str, Any]], clips: Sequence[Mapping[str, Any]],
+              annotations: Sequence[Mapping[str, str]] = ()):
         sources = {c["filename"]: c["file_path"] for c in clips}
         entries = [dict(filename=r["filename"], url=Path(r["file_path"]).as_uri(), event=r["event"],
                         t=float(r["peak_s"]), score=r["score"], speed=r["speed_kmh"],

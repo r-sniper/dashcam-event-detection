@@ -3,25 +3,28 @@
 import argparse
 import csv
 from collections import defaultdict
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+MatchRow = tuple[str, str, str, float | str, str]
+
 
 class GoldenSet:
-    def __init__(self, rows):
-        self.by_file = defaultdict(list)
+    def __init__(self, rows: Iterable[Mapping[str, str]]):
+        self.by_file: defaultdict[str, list[Mapping[str, str]]] = defaultdict(list)
         for row in rows:
             self.by_file[row["Filename"]].append(row)
 
     @classmethod
-    def read(cls, path):
+    def read(cls, path: str | Path) -> "GoldenSet":
         with Path(path).open(encoding="utf-8-sig", newline="") as f:
             return cls(csv.DictReader(f))
 
-    def evaluate(self, predictions):
-        details = []
+    def evaluate(self, predictions: Mapping[str, Sequence[float]]) -> list[MatchRow]:
+        details: list[MatchRow] = []
         for name, labels in self.by_file.items():
             peaks = sorted(predictions[name])
             if any(r["speedbreaker time range"].endswith("-") for r in labels):
@@ -43,7 +46,7 @@ class GoldenSet:
         return details
 
     @staticmethod
-    def metrics(details):
+    def metrics(details: Sequence[MatchRow]) -> dict[str, float | int]:
         counts = {kind: sum(row[-1] == kind for row in details)
                   for kind in ("hit", "miss", "unmatched prediction", "unscored")}
         tp, fn, fp = counts["hit"], counts["miss"], counts["unmatched prediction"]

@@ -10,9 +10,11 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import BinaryIO, cast
 
 import cv2
 import numpy as np
+from numpy.typing import NDArray
 from scipy.ndimage import median_filter
 from scipy.signal import find_peaks
 
@@ -21,11 +23,11 @@ from telemetry_time import IST, parse_timestamp
 
 @dataclass
 class GpsTrace:
-    seconds: np.ndarray
-    speed: np.ndarray
+    seconds: NDArray[np.float64]
+    speed: NDArray[np.float64]
 
     @classmethod
-    def read(cls, video: Path):
+    def read(cls, video: Path) -> "GpsTrace":
         sidecar = video.parent / "telemetry" / f"{video.stem}.telemetry.csv"
         if sidecar.exists():
             content = sidecar.read_text(encoding="utf-8-sig")
@@ -52,7 +54,7 @@ class GpsTrace:
         times = np.array(sorted(readings))
         return cls(times, np.array([readings[t] for t in times]))
 
-    def at(self, seconds):
+    def at(self, seconds: float | NDArray[np.float64]) -> NDArray[np.float64]:
         if not self.seconds.size:
             return np.full(np.shape(seconds), np.nan)
         speed = np.interp(seconds, self.seconds, self.speed)
@@ -71,13 +73,13 @@ class CameraMotion:
     fps = 10
 
     @classmethod
-    def measure(cls, previous, current):
+    def measure(cls, previous: NDArray[np.uint8], current: NDArray[np.uint8]) -> list[float]:
         points = cv2.goodFeaturesToTrack(previous, maxCorners=140, qualityLevel=0.01,
                                          minDistance=7, blockSize=5)
         if points is None or len(points) < 8:
             return [0., 0., 0.]
         tracked, status, errors = cv2.calcOpticalFlowPyrLK(
-            previous, current, points, None, winSize=(17, 17), maxLevel=2)
+            previous, current, points, np.empty_like(points), winSize=(17, 17), maxLevel=2)
         keep = (status.ravel() == 1) & (errors.ravel() < 30)
         a, b = points[keep, 0], tracked[keep, 0]
         if len(a) < 8:
@@ -92,7 +94,8 @@ class CameraMotion:
         return [dy, matrix[1, 0] * cls.width / 2, inliers.mean()]
 
     @classmethod
-    def read(cls, video: Path, start=0., end=None, hwaccel=None):
+    def read(cls, video: Path, start: float = 0., end: float | None = None,
+             hwaccel: str | None = None) -> NDArray[np.float64]:
         command = ["ffmpeg", "-v", "error", "-nostdin", "-threads", "3"]
         filters = [f"fps={cls.fps}"]
         if hwaccel == "d3d11va":
@@ -107,7 +110,8 @@ class CameraMotion:
         motion = []
         previous = None
         with subprocess.Popen(command, stdout=subprocess.PIPE) as process:
-            while data := process.stdout.read(cls.height * cls.width):
+            frames = cast(BinaryIO, process.stdout)
+            while data := frames.read(cls.height * cls.width):
                 frame = np.frombuffer(data, np.uint8).reshape(cls.height, cls.width)
                 current = frame[int(cls.height * .12):int(cls.height * .71)]
                 if previous is not None:
@@ -123,14 +127,14 @@ class ScanWindows:
     """In fast mode inspect GPS troughs, clip boundaries and gaps in GPS coverage."""
 
     @staticmethod
-    def duration(video):
+    def duration(video: Path) -> float:
         args = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                 "-of", "default=nw=1:nk=1", str(video)]
         return float(subprocess.check_output(args, text=True))
 
     @staticmethod
-    def guided(gps, duration):
-        seconds = np.arange(int(np.ceil(duration)))
+    def guided(gps: GpsTrace, duration: float) -> list[tuple[float, float]]:
+        seconds = np.arange(int(np.ceil(duration)), dtype=np.float64)
         speeds = gps.at(seconds)
         known = np.isfinite(speeds)
         if not known.any():
@@ -138,7 +142,7 @@ class ScanWindows:
         # Median filtering removes isolated zero-speed GPS fixes.
         smooth = median_filter(np.interp(seconds, seconds[known], speeds[known]), 3, mode="nearest")
         troughs, _ = find_peaks(-smooth, prominence=4, distance=4)
-        centers = [i for i in troughs if smooth[i] <= 36]
+        centers = [int(i) for i in troughs if smooth[i] <= 36]
         for i in [0, len(seconds) - 1]:
             if smooth[i] <= 36:
                 centers.append(i)
@@ -156,23 +160,23 @@ class ScanWindows:
 class MotionCache:
     """Reuse expensive full-clip optical flow when scoring or annotations change."""
 
-    def __init__(self, folder):
+    def __init__(self, folder: str | Path):
         self.folder = Path(folder)
         self.folder.mkdir(parents=True, exist_ok=True)
 
-    def path(self, video):
+    def path(self, video: Path) -> Path:
         stat = video.stat()
         identity = f"flow-v1|{video.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
         key = hashlib.sha256(identity.encode()).hexdigest()[:16]
         return self.folder / f"{video.stem}.{key}.npz"
 
-    def store(self, video, motion):
+    def store(self, video: Path, motion: NDArray[np.float64]):
         target = self.path(video)
         with tempfile.NamedTemporaryFile(dir=self.folder, suffix=".tmp", delete=False) as f:
             np.savez_compressed(f, motion=motion)
         os.replace(f.name, target)
 
-    def read(self, video, hwaccel=None):
+    def read(self, video: Path, hwaccel: str | None = None) -> NDArray[np.float64]:
         target = self.path(video)
         if target.exists():
             with np.load(target) as data:

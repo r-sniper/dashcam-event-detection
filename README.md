@@ -13,4 +13,4 @@ uv run --locked analyze.py videos/complete --detect speedbreaker,warning_sign --
 
 Open `visualize/events.html` to jump to detections in the original footage. The event CSV includes the filename, clip-relative timestamp and score. The companion `events.clips.csv` lists coverage for each clip.
 
-For crossings alone, use `--detect speedbreaker` and omit `--sign-lookback`. GPS speeds come from `telemetry/<clip stem>.telemetry.csv` alongside the footage, or from the MP4 when ExifTool is on PATH. The default scan can also detect crossings using camera motion alone.
+For crossings alone, use `--detect speedbreaker` and omit `--sign-lookback`. The crossing detector samples the full duration of every clip at 10 frames per second. GPS speeds come from `telemetry/<clip stem>.telemetry.csv` alongside the footage, or from the MP4 when ExifTool is on PATH. The scan can also detect crossings using camera motion alone.
