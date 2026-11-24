@@ -1,14 +1,10 @@
 """Time-aligned camera motion and GPS measurements."""
 
-import csv
 import hashlib
-import io
 import os
-import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO, cast
 
@@ -18,41 +14,11 @@ from numpy.typing import NDArray
 from scipy.ndimage import median_filter
 from scipy.signal import find_peaks
 
-from telemetry_time import IST, parse_timestamp
-
 
 @dataclass
 class GpsTrace:
     seconds: NDArray[np.float64]
     speed: NDArray[np.float64]
-
-    @classmethod
-    def read(cls, video: Path) -> "GpsTrace":
-        sidecar = video.parent / "telemetry" / f"{video.stem}.telemetry.csv"
-        if sidecar.exists():
-            content = sidecar.read_text(encoding="utf-8-sig")
-        elif shutil.which("exiftool"):
-            fmt = Path(__file__).resolve().parents[1] / "telemetry.fmt"
-            command = ["exiftool", "-ee3", "-n", "-p", str(fmt), str(video)]
-            try:
-                content = subprocess.run(command, check=True, capture_output=True, text=True).stdout
-            except (OSError, subprocess.CalledProcessError):
-                content = ""
-        else:
-            content = ""
-        try:
-            start = datetime.strptime(video.stem[:16], "%Y_%m%d_%H%M%S").replace(tzinfo=IST)
-        except ValueError:
-            return cls(np.array([]), np.array([]))
-        readings = {}
-        for row in csv.DictReader(io.StringIO(content)):
-            try:
-                offset = (parse_timestamp(row["gps_timestamp_utc"]) - start).total_seconds()
-                readings[offset] = float(row["speed_kmh"])
-            except ValueError:
-                continue
-        times = np.array(sorted(readings))
-        return cls(times, np.array([readings[t] for t in times]))
 
     def at(self, seconds: float | NDArray[np.float64]) -> NDArray[np.float64]:
         if not self.seconds.size:
@@ -125,12 +91,6 @@ class CameraMotion:
 
 class ScanWindows:
     """In fast mode inspect GPS troughs, clip boundaries and gaps in GPS coverage."""
-
-    @staticmethod
-    def duration(video: Path) -> float:
-        args = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                "-of", "default=nw=1:nk=1", str(video)]
-        return float(subprocess.check_output(args, text=True))
 
     @staticmethod
     def guided(gps: GpsTrace, duration: float) -> list[tuple[float, float]]:

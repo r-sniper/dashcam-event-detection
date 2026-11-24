@@ -17,10 +17,6 @@ class Detection:
     event: str
     peak_s: float
     score: float
-    bounce_px: float | None = None
-    speed_kmh: float | None = None
-    # Normalized image coordinates, populated for warning signs.
-    box: str = ""
 
 
 class FrontClips:

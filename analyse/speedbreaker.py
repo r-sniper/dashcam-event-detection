@@ -1,8 +1,8 @@
 """Score individual crossings using pitch reversal and local GPS speed changes."""
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from functools import reduce
-from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
@@ -10,19 +10,25 @@ from scipy.ndimage import gaussian_filter1d, maximum_filter1d, median_filter, mi
 from scipy.signal import find_peaks
 
 from .common import Detection, DetectorName
-from .signals import CameraMotion, GpsTrace, MotionCache, ScanWindows
+from .preprocess import ProcessedVideo
+from .signals import CameraMotion, GpsTrace, ScanWindows
+
+
+@dataclass
+class SpeedbreakerDetection(Detection):
+    bounce_px: float
+    speed_kmh: float | None
 
 
 class SpeedbreakerDetector:
     name = DetectorName.SPEEDBREAKER
+    result_type = SpeedbreakerDetection
     # Lowest threshold tied for best event-level F2 on the 13 November guide clips.
     threshold = 1.95
     separation_s = 5
 
-    def __init__(self, scan_mode: str = "full", cache: MotionCache | None = None, hwaccel: str | None = None):
+    def __init__(self, scan_mode: str = "full"):
         self.scan_mode = scan_mode
-        self.cache = cache
-        self.hwaccel = hwaccel
 
     @staticmethod
     def measure(motion: NDArray[np.float64], gps: GpsTrace) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
@@ -46,7 +52,7 @@ class SpeedbreakerDetector:
                  + .50 * np.nan_to_num(crossing_brake, nan=.20))
         return bounce, np.log1p(bounce) + prior
 
-    def score_windows(self, chunks: Iterable[NDArray[np.float64]], gps: GpsTrace) -> list[Detection]:
+    def score_windows(self, chunks: Iterable[NDArray[np.float64]], gps: GpsTrace) -> list[SpeedbreakerDetection]:
         candidates = []
         for motion in chunks:
             if len(motion) < 3:
@@ -58,9 +64,11 @@ class SpeedbreakerDetector:
             for i in peaks - 1:
                 t = float(motion[i, 0])
                 speed = gps.at(t)
-                candidates.append(Detection(self.name.value, round(t, 2), round(float(score[i]), 3),
-                                            round(float(bounce[i]), 3),
-                                            round(float(speed), 1) if np.isfinite(speed) else None))
+                candidates.append(self.result_type(
+                    event=self.name.value, peak_s=round(t, 2), score=round(float(score[i]), 3),
+                    bounce_px=round(float(bounce[i]), 3),
+                    speed_kmh=round(float(speed), 1) if np.isfinite(speed) else None,
+                ))
         # Adjacent search windows can contain the same bounce at their edges.
         kept = []
         for event in sorted(candidates, key=lambda event: -event.score):
@@ -68,11 +76,15 @@ class SpeedbreakerDetector:
                 kept.append(event)
         return sorted(kept, key=lambda event: event.peak_s)
 
-    def detect(self, video: Path, duration: float) -> tuple[list[Detection], float]:
-        gps = GpsTrace.read(video)
-        if self.scan_mode == "full" and self.cache is not None:
-            return self.score_windows([self.cache.read(video, self.hwaccel)], gps), duration
-        windows = (ScanWindows.guided(gps, duration) if self.scan_mode == "gps-first"
-                   else [(0., duration)])
-        chunks = (CameraMotion.read(video, a, b, self.hwaccel) for a, b in windows)
+    def detect(self, video: ProcessedVideo) -> tuple[list[SpeedbreakerDetection], float]:
+        motion = video.motion
+        if motion is None or len(motion) < 3:
+            raise ValueError(f"{video.path.name}: speedbreaker requires at least three camera-motion samples")
+        gps = video.gps_trace
+        if not np.any((gps.seconds >= 0) & (gps.seconds <= video.duration)):
+            raise ValueError(f"{video.path.name}: speedbreaker requires GPS speed samples aligned to the clip")
+        if self.scan_mode == "full":
+            return self.score_windows([motion], gps), video.duration
+        windows = ScanWindows.guided(gps, video.duration)
+        chunks = (motion[(motion[:, 0] >= a) & (motion[:, 0] < b)] for a, b in windows)
         return self.score_windows(chunks, gps), sum(b - a for a, b in windows)

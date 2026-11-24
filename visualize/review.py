@@ -20,8 +20,8 @@ class ReviewPage:
               annotations: Sequence[Mapping[str, str]] = ()):
         sources = {c["filename"]: c["file_path"] for c in clips}
         entries = [dict(filename=r["filename"], url=Path(r["file_path"]).as_uri(), event=r["event"],
-                        t=float(r["peak_s"]), score=r["score"], speed=r["speed_kmh"],
-                        box=r["box"], range="", result="") for r in events]
+                        t=float(r["peak_s"]), score=r["score"], speed=r.get("speed_kmh"),
+                        box=r.get("box", ""), range="", result="") for r in events]
         annotation_status = {}
         if annotations:
             from analyse.evaluate import GoldenSet

@@ -4,7 +4,7 @@ Detect speedbreaker crossings from camera motion and GPS speed, and look for tri
 
 ## Run a scan
 
-Install `uv` and put FFmpeg and FFprobe on your PATH. Pass a folder of clips or individual files. This command scans for crossings, looks for signs on each approach, and writes an offline review page.
+Install `uv` and put FFmpeg, FFprobe and ExifTool on your PATH. Pass a folder of clips or individual files. This command scans for crossings, looks for signs on each approach, and writes an offline review page.
 
 ```powershell
 uv sync --locked
@@ -13,4 +13,6 @@ uv run --locked analyze.py videos/complete --detect speedbreaker,warning_sign --
 
 Open `visualize/events.html` to jump to detections in the original footage. The event CSV includes the filename, clip-relative timestamp and score. The companion `events.clips.csv` lists coverage for each clip.
 
-For crossings alone, use `--detect speedbreaker` and omit `--sign-lookback`. The crossing detector samples the full duration of every clip at 10 frames per second. GPS speeds come from `telemetry/<clip stem>.telemetry.csv` alongside the footage, or from the MP4 when ExifTool is on PATH. The scan can also detect crossings using camera motion alone.
+Each run prepares a `ProcessedVideo` directly from each MP4 before detection. It contains container and stream metadata, timestamped GPS coordinates, speed and heading. Speedbreaker runs also measure camera motion at 10 Hz. The speedbreaker detector requires motion samples and at least one GPS speed aligned to the clip. A GPS gap can leave an individual crossing's speed empty. Warning-sign detection only needs the video frames and duration.
+
+Preprocessing writes one archive per clip and extraction configuration under `.speedbreaker-work/preprocessed/`. By default each run refreshes the archive. Add `--preprocess-cache` to reuse it when the source path, size, modification time, preprocessing version and extraction settings match. Use `--work-dir PATH` to choose another working directory. The existing `--motion-cache PATH` flag can still reuse optical flow independently.

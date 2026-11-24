@@ -1,16 +1,20 @@
 """Optional visual candidates for upright Indian triangular warning signs."""
 
-import subprocess
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from pathlib import Path
-from typing import BinaryIO, cast
+from typing import cast
 
 import cv2
 import numpy as np
 from numpy.typing import NDArray
 
 from .common import Detection, DetectorName
+from .preprocess import ProcessedVideo
+
+
+@dataclass
+class WarningSignDetection(Detection):
+    box: str  # Normalized x, y, width, height in the source frame.
 
 
 @dataclass
@@ -19,11 +23,12 @@ class SignTrack:
     count: int
     x: float
     y: float
-    best: Detection
+    best: WarningSignDetection
 
 
 class WarningSignDetector:
     name = DetectorName.WARNING_SIGN
+    result_type = WarningSignDetection
     width, height, fps = 960, 540, 2
 
     @staticmethod
@@ -67,7 +72,7 @@ class WarningSignDetector:
             return "warning_sign_candidate", 0.
         return symbol, best[symbol]
 
-    def candidates(self, frame: NDArray[np.uint8], t: float) -> Iterator[tuple[float, float, Detection]]:
+    def candidates(self, frame: NDArray[np.uint8], t: float) -> Iterator[tuple[float, float, WarningSignDetection]]:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         h, s, v = cv2.split(hsv)
         red = ((h < 12) | (h > 168)) & (s > 70) & (v > 55)
@@ -95,7 +100,7 @@ class WarningSignDetector:
                 continue
             label, similarity = self.classify_face(face)
             box = ",".join(f"{n:.4f}" for n in (x/self.width, y/self.height, w/self.width, h/self.height))
-            yield (x + w/2)/self.width, (y + h/2)/self.height, Detection(label, t, round(similarity, 3), box=box)
+            yield (x + w/2)/self.width, (y + h/2)/self.height, self.result_type(label, t, round(similarity, 3), box)
 
     @staticmethod
     def approaches(crossings: Iterable[Detection], duration: float, lookback: float) -> list[tuple[float, float]]:
@@ -109,37 +114,27 @@ class WarningSignDetector:
                 windows.append((start, end))
         return windows
 
-    def scan_window(self, video: Path, start: float, end: float) -> list[Detection]:
-        command = ["ffmpeg", "-v", "error", "-nostdin", "-threads", "3", "-ss", str(start),
-                   "-i", str(video), "-t", str(end-start), "-an",
-                   "-vf", f"fps={self.fps}:round=up,scale={self.width}:{self.height}:flags=fast_bilinear",
-                   "-filter_threads", "1", "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"]
+    def scan_window(self, video: ProcessedVideo, start: float, end: float) -> list[WarningSignDetection]:
         tracks = []
-        with subprocess.Popen(command, stdout=subprocess.PIPE) as process:
-            index = 0
-            frames = cast(BinaryIO, process.stdout)
-            while data := frames.read(self.width * self.height * 3):
-                frame = np.frombuffer(data, np.uint8).reshape(self.height, self.width, 3)
-                t = start + index / self.fps
-                for x, y, event in self.candidates(frame, t):
-                    nearby = [tr for tr in tracks if 0 < t - tr.last <= 1.
-                              and np.hypot(x - tr.x, y - tr.y) < .09]
-                    if nearby:
-                        tr = min(nearby, key=lambda k: np.hypot(x-k.x, y-k.y))
-                        tr.last, tr.x, tr.y = t, x, y
-                        tr.count += 1
-                        if event.score > tr.best.score:
-                            tr.best = event
-                    else:
-                        tracks.append(SignTrack(t, 1, x, y, event))
-                index += 1
-            if process.wait():
-                raise RuntimeError(f"FFmpeg could not finish the sign scan of {video}")
+        for frame in video.frames(start, end, self.width, self.height, self.fps):
+            for x, y, event in self.candidates(frame.bgr, frame.timestamp_s):
+                nearby = [tr for tr in tracks if 0 < frame.timestamp_s - tr.last <= 1.
+                          and np.hypot(x - tr.x, y - tr.y) < .09]
+                if nearby:
+                    tr = min(nearby, key=lambda k: np.hypot(x-k.x, y-k.y))
+                    tr.last, tr.x, tr.y = frame.timestamp_s, x, y
+                    tr.count += 1
+                    if event.score > tr.best.score:
+                        tr.best = event
+                else:
+                    tracks.append(SignTrack(frame.timestamp_s, 1, x, y, event))
         return [tr.best for tr in tracks if tr.count >= 2]
 
-    def detect(self, video: Path, duration: float,
-               windows: list[tuple[float, float]] | None = None) -> tuple[list[Detection], float]:
+    def detect(self, video: ProcessedVideo,
+               windows: list[tuple[float, float]] | None = None) -> tuple[list[WarningSignDetection], float]:
+        if not video.has_video_stream:
+            raise ValueError(f"{video.path.name}: warning_sign requires a video stream")
         if windows is None:
-            windows = [(0., duration)]
+            windows = [(0., video.duration)]
         events = [e for start, end in windows for e in self.scan_window(video, start, end)]
         return events, sum(end-start for start, end in windows)
