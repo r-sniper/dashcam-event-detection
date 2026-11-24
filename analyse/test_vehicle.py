@@ -1,7 +1,9 @@
 import csv
 import json
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from importlib.util import find_spec
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -16,6 +18,40 @@ from .warning_sign import WarningSignDetection, WarningSignDetector
 
 
 class VehicleTests(unittest.TestCase):
+    def test_clip_completion_logs_can_arrive_out_of_input_order(self):
+        videos = [ProcessedVideo(Path(name), 1., True, [], None) for name in ("firstF.MP4", "secondF.MP4")]
+        run = AnalysisRun([DetectorName.WARNING_SIGN])
+        with (ThreadPoolExecutor(max_workers=2) as pool,
+              patch.object(WarningSignDetector, "detect", return_value=([], 1.)),
+              patch("analyse.run.as_completed", side_effect=reversed),
+              self.assertLogs("analyse.run", level="INFO") as log):
+            results = run.scan_videos(videos, pool)
+        messages = [record.getMessage() for record in log.records]
+        self.assertEqual([msg for msg in messages if msg.startswith("[")],
+                         ["[1/2] Scanned secondF.MP4", "[2/2] Scanned firstF.MP4"])
+        self.assertEqual([clip["filename"] for per_video in results for _, clip in per_video],
+                         ["firstF.MP4", "secondF.MP4"])
+
+    def test_progress_reports_processed_frames_at_wall_clock_intervals(self):
+        video = ProcessedVideo(Path("sampleF.MP4"), .9, True, [], None)
+        pixels = np.zeros((1, 1, 3), dtype=np.uint8)
+        frames = [VideoFrame(t, pixels) for t in (0., .25, .5, .75)]
+        with (patch.object(ProcessedVideo, "native_frames", return_value=iter(frames)),
+              patch("analyse.vehicle.sys.stdout", new_callable=StringIO),
+              patch("analyse.vehicle.monotonic", side_effect=[0., 1., 5.1, 8.9, 10.2]),
+              self.assertLogs("analyse.vehicle", level="INFO") as log):
+            self.assertEqual(list(VehicleDetector.scan_frames(video)), frames)
+        self.assertEqual([record.getMessage() for record in log.records],
+                         ["vehicle on sampleF.MP4 | 0.5/0.9 s of footage (56%), 2 frames processed",
+                          "vehicle on sampleF.MP4 | 0.9/0.9 s of footage (100%), 4 frames processed"])
+
+        with (patch.object(ProcessedVideo, "native_frames", return_value=iter(frames)),
+              patch("analyse.vehicle.sys.stdout", new_callable=StringIO) as output,
+              patch.object(output, "isatty", return_value=True)):
+            self.assertEqual(list(VehicleDetector.scan_frames(video)), frames)
+        self.assertIn("vehicle sampleF.MP4", output.getvalue())
+        self.assertIn("0/4", output.getvalue())
+
     def test_default_output_for_single_and_combined_detectors(self):
         vehicle = DetectorName.VEHICLE
         crossing, sign = DetectorName.SPEEDBREAKER, DetectorName.WARNING_SIGN
@@ -80,9 +116,11 @@ class VehicleTests(unittest.TestCase):
             with (patch("analyse.run.VideoPreprocessor.process", return_value=video),
                   patch.dict("analyse.run.AnalysisRun.detectors", {VehicleDetector.name: SampleDetector}),
                   patch.object(WarningSignDetector, "detect", return_value=([sign], 3.)),
-                  patch.object(ProcessedVideo, "native_frames", return_value=iter(frames))):
+                  patch.object(ProcessedVideo, "native_frames", return_value=iter(frames)),
+                  self.assertLogs("analyse.run", level="INFO") as log):
                 main([str(path), "--detect", "vehicle,warning_sign", "--output", str(root / "events.csv"),
                       "--review", str(root / "events.html")])
+            self.assertIn("Running detectors: vehicle, warning_sign", [r.getMessage() for r in log.records])
             with (root / "events.csv").open(newline="") as f:
                 rows = list(csv.DictReader(f))
             self.assertEqual(len(rows), 4)

@@ -10,10 +10,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, fields
 from datetime import datetime
 from pathlib import Path
+from time import monotonic
 from typing import TypedDict, cast
 
 import cv2
 from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from .common import Detection, DetectorName, FrontClips
 from .compilation import SpeedbreakerCompilation
@@ -101,6 +103,8 @@ class AnalysisRun:
         results = []
         crossings = []
         for detector in self.selected:
+            logger.info("Starting %s on %s (%.1f s of footage)", detector.name, video.path.name, video.duration)
+            started = monotonic()
             mode = self.scan_mode if detector.name == DetectorName.SPEEDBREAKER else "full"
             if isinstance(detector, WarningSignDetector) and self.sign_lookback is not None:
                 windows = detector.approaches(crossings, video.duration, self.sign_lookback)
@@ -108,17 +112,21 @@ class AnalysisRun:
                 mode = f"approach-{self.sign_lookback:g}s"
             else:
                 events, inspected = detector.detect(video)
+            logger.info("Finished %s on %s in %.1f s (%d events)", detector.name, video.path.name,
+                        monotonic() - started, len(events))
             if detector.name == DetectorName.SPEEDBREAKER:
                 crossings = events
             results.append(self.record(video.path, detector.name, mode, video.duration, inspected, events))
         return results
 
     def scan_videos(self, videos: Sequence[ProcessedVideo], pool: ThreadPoolExecutor) -> list[list[ScanResult]]:
-        results = []
-        for i, per_video in enumerate(pool.map(self.run_detectors, videos), 1):
-            logger.info("[%d/%d] Scanned %s", i, len(videos), videos[i - 1].path.name)
-            results.append(per_video)
-        return results
+        with tqdm(total=len(videos), desc="Detection", unit="clip", file=sys.stdout, disable=None) as progress:
+            futures = {pool.submit(self.run_detectors, video): video for video in videos}
+            for i, future in enumerate(as_completed(futures), 1):
+                future.result()
+                progress.update()
+                logger.info("[%d/%d] Scanned %s", i, len(videos), futures[future].path.name)
+        return [future.result() for future in futures]
 
     @staticmethod
     def assign_ids(events: Sequence[EventRow], clips: Sequence[ClipRow]):
@@ -203,6 +211,8 @@ def build_args(parser: argparse.ArgumentParser, argv: Sequence[str] | None) -> a
     if unknown:
         parser.error(f"Unknown detector(s): {', '.join(sorted(unknown))}. Available: {', '.join(AnalysisRun.detectors)}")
     args.detect = [DetectorName(name) for name in requested]
+    if args.output is None:
+        args.output = AnalysisRun.default_output(args.detect)
     if args.sign_lookback is not None:
         required = {DetectorName.SPEEDBREAKER, DetectorName.WARNING_SIGN}
         if not (args.sign_lookback > 0 and required.issubset(args.detect)):
@@ -256,8 +266,9 @@ def main(argv: Sequence[str] | None = None):
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         logger.info("Starting preprocessing")
         processed = preprocess_videos(videos, args, pool)
-        logger.info("Running detectors")
-        results = run.scan_videos(processed, pool)
+        logger.info("Running detectors: %s", ", ".join(str(detector.name) for detector in run.selected))
+        with logging_redirect_tqdm():
+            results = run.scan_videos(processed, pool)
 
     events, clips = run.collect_results(results)
     logger.info("Saving results to %s", args.output)
