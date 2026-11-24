@@ -117,6 +117,13 @@ class ProcessedVideo:
             if process.wait():
                 raise RuntimeError(f"FFmpeg could not read frames from {self.path}")
 
+    def native_frames(self, fps: int) -> Iterator[VideoFrame]:
+        """Keep the original pixels for detectors that read small text."""
+        metadata = self.debug_metadata or FFprobeResult.read(self.path).raw
+        streams = cast(list[dict[str, object]], metadata["streams"])
+        stream = next(s for s in streams if s["codec_type"] == "video")
+        return self.frames(0, self.duration, cast(int, stream["width"]), cast(int, stream["height"]), fps)
+
     def save(self, target: Path):
         header = json.dumps({"path": str(self.path), "duration": self.duration,
                              "has_video_stream": self.has_video_stream, "debug_metadata": self.debug_metadata,

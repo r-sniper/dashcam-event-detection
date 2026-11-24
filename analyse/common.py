@@ -7,6 +7,7 @@ from pathlib import Path
 class DetectorName(str, Enum):
     SPEEDBREAKER = "speedbreaker"
     WARNING_SIGN = "warning_sign"
+    VEHICLE = "vehicle"
 
     def __str__(self) -> str:
         return self.value

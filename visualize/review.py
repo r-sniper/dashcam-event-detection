@@ -21,7 +21,9 @@ class ReviewPage:
         sources = {c["filename"]: c["file_path"] for c in clips}
         entries = [dict(filename=r["filename"], url=Path(r["file_path"]).as_uri(), event=r["event"],
                         t=float(r["peak_s"]), score=r["score"], speed=r.get("speed_kmh"),
-                        box=r.get("box", ""), range=f"{r['start_s']}–{r['end_s']}" if r.get("end_s") else "",
+                        box=r.get("box", ""), vehicle=r.get("vehicle_type", ""),
+                        plate=r.get("plate_number", ""), plateBox=r.get("plate_box", ""),
+                        range=f"{r['start_s']}–{r['end_s']}" if r.get("end_s") not in (None, "") else "",
                         result="") for r in events]
         annotation_status = {}
         if annotations:

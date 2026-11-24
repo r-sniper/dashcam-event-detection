@@ -20,6 +20,7 @@ from .compilation import SpeedbreakerCompilation
 from .preprocess import DEFAULT_WORK_DIR, ProcessedVideo, VideoPreprocessor
 from .signals import MotionCache
 from .speedbreaker import SpeedbreakerDetector
+from .vehicle import VehicleDetector
 from .warning_sign import WarningSignDetector
 
 
@@ -51,13 +52,14 @@ class ClipRow(TypedDict):
 
 
 ScanResult = tuple[list[EventRow], ClipRow]
-Detector = SpeedbreakerDetector | WarningSignDetector
+Detector = SpeedbreakerDetector | WarningSignDetector | VehicleDetector
 
 
 class AnalysisRun:
     detectors: dict[DetectorName, type[Detector]] = {
         SpeedbreakerDetector.name: SpeedbreakerDetector,
         WarningSignDetector.name: WarningSignDetector,
+        VehicleDetector.name: VehicleDetector,
     }
     event_fields = ["encounter_id", "filename", "file_path", *dict.fromkeys(
         field.name for detector in detectors.values() for field in fields(detector.result_type)
@@ -173,7 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--detect", default=DetectorName.SPEEDBREAKER.value, help=f"Comma-separated: {available}")
     # Accept the explicit full mode used by earlier CLI commands.
     p.add_argument("--scan-mode", choices=("full",), help=argparse.SUPPRESS)
-    p.add_argument("--output", type=Path, default=Path("analysis/speedbreaker/detections.csv"))
+    p.add_argument("--output", type=Path, help="Write detections to this CSV file")
     p.add_argument("--workers", type=int, default=2, help="Number of clips to process in parallel")
     p.add_argument("--work-dir", type=Path, default=DEFAULT_WORK_DIR,
                    help="Store preprocessed clips here (default: %(default)s)")
