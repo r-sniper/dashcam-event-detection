@@ -66,6 +66,14 @@ class AnalysisRun:
     )]
     clip_fields = ["filename", "file_path", "detector", "scan_mode", "duration_s", "inspected_s", "events"]
 
+    @staticmethod
+    def default_output(names: Sequence[DetectorName]) -> Path:
+        # Warning signs have always shared the speedbreaker output directory.
+        folders = {DetectorName.SPEEDBREAKER if name == DetectorName.WARNING_SIGN else name for name in names}
+        if len(folders) == 1:
+            return Path("analysis") / folders.pop().value / "detections.csv"
+        return Path("analysis/events.csv")
+
     def __init__(self, names: Sequence[DetectorName], scan_mode: str = "full", sign_lookback: float | None = None):
         self.scan_mode = scan_mode
         self.sign_lookback = sign_lookback

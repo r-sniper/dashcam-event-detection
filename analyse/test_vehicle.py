@@ -1,4 +1,5 @@
 import csv
+import json
 import unittest
 from importlib.util import find_spec
 from pathlib import Path
@@ -7,13 +8,24 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
+from .common import DetectorName
 from .preprocess import ProcessedVideo, VideoFrame
-from .run import main
+from .run import AnalysisRun, main
 from .vehicle import IndianRegistration, VehicleDetection, VehicleDetector, VehicleTrack
 from .warning_sign import WarningSignDetection, WarningSignDetector
 
 
 class VehicleTests(unittest.TestCase):
+    def test_default_output_for_single_and_combined_detectors(self):
+        vehicle = DetectorName.VEHICLE
+        crossing, sign = DetectorName.SPEEDBREAKER, DetectorName.WARNING_SIGN
+        for names, path in [([vehicle], "analysis/vehicle/detections.csv"),
+                            ([sign], "analysis/speedbreaker/detections.csv"),
+                            ([crossing, sign], "analysis/speedbreaker/detections.csv"),
+                            ([vehicle, crossing], "analysis/events.csv")]:
+            with self.subTest(names=names):
+                self.assertEqual(AnalysisRun.default_output(names), Path(path))
+
     def test_registration_formats(self):
         for number, kind in (("TS09AB1234", "state"), ("TG09A1234", "state"), ("DL9CAB1234", "state"),
                              ("24BH1234AB", "BH"), ("23BH0007A", "BH"), ("MHVAAB0001", "vintage"), ("TS09AB12", ""),
@@ -78,7 +90,11 @@ class VehicleTests(unittest.TestCase):
             self.assertEqual((bike_row["plate_number"], bike_row["plate_reads"]), ("24BH1234AB", "2"))
             self.assertEqual(bike_row["plate_box"], "0.60000,0.70833,0.20000,0.12500")
             self.assertTrue(all(row["plate_box"] == "" for row in rows if row["vehicle_type"] == "car"))
-            self.assertIn("24BH1234AB", (root / "events.html").read_text(encoding="utf-8"))
+            html = (root / "events.html").read_text(encoding="utf-8")
+            review, _ = json.JSONDecoder().raw_decode(html.split("const data=", 1)[1])
+            bike_entry, = (entry for entry in review["entries"] if entry["vehicle"] == "motorcycle")
+            self.assertEqual((bike_entry["plate"], bike_entry["plateBox"], bike_entry["range"]),
+                             (bike_row["plate_number"], bike_row["plate_box"], "0.0–0.25"))
             with (root / "events.clips.csv").open(newline="") as f:
                 counts = {row["detector"]: row["events"] for row in csv.DictReader(f)}
             self.assertEqual(counts, {"vehicle": "3", "warning_sign": "1"})

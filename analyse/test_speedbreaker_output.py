@@ -13,6 +13,7 @@ from .compilation import SourceStreams, SpeedbreakerCompilation
 from .run import AnalysisRun
 from .signals import CameraMotion, GpsTrace
 from .speedbreaker import SpeedbreakerDetection, SpeedbreakerDetector
+from .vehicle import VehicleDetection
 from .warning_sign import WarningSignDetection
 
 
@@ -51,6 +52,8 @@ class SpeedbreakerOutputTests(unittest.TestCase):
             sign = WarningSignDetection("possible_speedbreaker_sign", .1, .8, "")
             sign_result = AnalysisRun.record(root / "aF.mp4", DetectorName.WARNING_SIGN, "full", 1., 1., [sign])
             results[-1].append(sign_result)
+            car = VehicleDetection("vehicle", .4, .9, "car", 0., .8, "0,0,1,1")
+            results[-1].append(AnalysisRun.record(root / "aF.mp4", DetectorName.VEHICLE, "full", 1., 1., [car]))
             output = root / "events.csv"
             events, clips = AnalysisRun.collect_results(results)
             AnalysisRun.save(events, clips, output)
@@ -58,7 +61,8 @@ class SpeedbreakerOutputTests(unittest.TestCase):
                 rows = list(csv.DictReader(table))
             columns = ("filename", "start_s", "end_s", "buffered_start_s", "buffered_end_s")
             self.assertEqual([tuple(row[key] for key in columns) for row in rows],
-                             [("aF.mp4", "", "", "", ""), ("aF.mp4", "0.52", "0.8", "0.36", "0.96"),
+                             [("aF.mp4", "", "", "", ""), ("aF.mp4", "0.0", "0.8", "", ""),
+                              ("aF.mp4", "0.52", "0.8", "0.36", "0.96"),
                               ("bF.mp4", "0.52", "0.8", "0.36", "0.96")])
 
             video = output.with_suffix(".speedbreakers.mp4")
