@@ -1,21 +1,27 @@
 import argparse
 import csv
+import logging
 import os
+import sys
 import tempfile
-from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Collection, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, fields
 from datetime import datetime
 from pathlib import Path
 from typing import TypedDict, cast
 
 import cv2
+from tqdm import tqdm
 
 from .common import Detection, DetectorName, FrontClips
-from .preprocess import DEFAULT_WORK_DIR, VideoPreprocessor
+from .preprocess import DEFAULT_WORK_DIR, ProcessedVideo, VideoPreprocessor
 from .signals import MotionCache
 from .speedbreaker import SpeedbreakerDetector
 from .warning_sign import WarningSignDetector
+
+
+logger = logging.getLogger(__name__)
 
 
 class EncounterField(TypedDict, total=False):
@@ -56,13 +62,9 @@ class AnalysisRun:
     )]
     clip_fields = ["filename", "file_path", "detector", "scan_mode", "duration_s", "inspected_s", "events"]
 
-    def __init__(self, names: Sequence[DetectorName], scan_mode: str = "full", cache: MotionCache | None = None,
-                 hwaccel: str | None = None, sign_lookback: float | None = None,
-                 work_dir: Path = DEFAULT_WORK_DIR, preprocess_cache: bool = False):
+    def __init__(self, names: Sequence[DetectorName], scan_mode: str = "full", sign_lookback: float | None = None):
         self.scan_mode = scan_mode
         self.sign_lookback = sign_lookback
-        self.preprocessor = VideoPreprocessor(work_dir, preprocess_cache, include_motion=DetectorName.SPEEDBREAKER in names,
-                                              motion_cache=cache, hwaccel=hwaccel)
         if sign_lookback is not None:
             names = sorted(names, key=lambda name: name != DetectorName.SPEEDBREAKER)
         self.selected: list[Detector] = []
@@ -83,22 +85,27 @@ class AnalysisRun:
                        duration_s=round(duration, 3), inspected_s=round(inspected, 3), events=len(events))
         return events, clip
 
-    def scan(self, video: Path) -> list[ScanResult]:
-        processed = self.preprocessor.process(video)
-        duration = processed.duration
+    def run_detectors(self, video: ProcessedVideo) -> list[ScanResult]:
         results = []
         crossings = []
         for detector in self.selected:
             mode = self.scan_mode if detector.name == DetectorName.SPEEDBREAKER else "full"
             if isinstance(detector, WarningSignDetector) and self.sign_lookback is not None:
-                windows = detector.approaches(crossings, duration, self.sign_lookback)
-                events, inspected = detector.detect(processed, windows)
+                windows = detector.approaches(crossings, video.duration, self.sign_lookback)
+                events, inspected = detector.detect(video, windows)
                 mode = f"approach-{self.sign_lookback:g}s"
             else:
-                events, inspected = detector.detect(processed)
+                events, inspected = detector.detect(video)
             if detector.name == DetectorName.SPEEDBREAKER:
                 crossings = events
-            results.append(self.record(video, detector.name, mode, duration, inspected, events))
+            results.append(self.record(video.path, detector.name, mode, video.duration, inspected, events))
+        return results
+
+    def scan_videos(self, videos: Sequence[ProcessedVideo], pool: ThreadPoolExecutor) -> list[list[ScanResult]]:
+        results = []
+        for i, per_video in enumerate(pool.map(self.run_detectors, videos), 1):
+            logger.info("[%d/%d] Scanned %s", i, len(videos), videos[i - 1].path.name)
+            results.append(per_video)
         return results
 
     @staticmethod
@@ -154,7 +161,7 @@ class AnalysisRun:
         return events, clips
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Find events in a list or folder of Viofo front-camera MP4s.")
     p.add_argument("inputs", type=Path, nargs="+", help="Front MP4s, or folders containing them")
     available = ", ".join(AnalysisRun.detectors)
@@ -162,7 +169,7 @@ def main():
     # Accept the explicit full mode used by earlier CLI commands.
     p.add_argument("--scan-mode", choices=("full",), help=argparse.SUPPRESS)
     p.add_argument("--output", type=Path, default=Path("analysis/speedbreaker/detections.csv"))
-    p.add_argument("--workers", type=int, default=2)
+    p.add_argument("--workers", type=int, default=2, help="Number of clips to process in parallel")
     p.add_argument("--work-dir", type=Path, default=DEFAULT_WORK_DIR,
                    help="Store preprocessed clips here (default: %(default)s)")
     p.add_argument("--preprocess-cache", action="store_true",
@@ -171,33 +178,64 @@ def main():
     p.add_argument("--hwaccel", choices=["d3d11va"], help="Use Windows GPU decoding for 8-bit motion analysis")
     p.add_argument("--sign-lookback", type=float, help="Search for signs this many seconds before each detected crossing")
     p.add_argument("--review", type=Path, help="Write an offline HTML video review page")
-    args = p.parse_args()
+    return p
+
+
+def check_prerequisites(args: argparse.Namespace, parser: argparse.ArgumentParser) -> tuple[list[DetectorName], list[Path]]:
     requested = list(dict.fromkeys(n.strip() for n in args.detect.split(",")))
     unknown = set(requested) - AnalysisRun.detectors.keys()
     if unknown:
-        p.error(f"Unknown detector(s): {', '.join(sorted(unknown))}. Available: {available}")
+        parser.error(f"Unknown detector(s): {', '.join(sorted(unknown))}. Available: {', '.join(AnalysisRun.detectors)}")
     names = [DetectorName(name) for name in requested]
     if args.sign_lookback is not None:
         required = {DetectorName.SPEEDBREAKER, DetectorName.WARNING_SIGN}
         if args.sign_lookback <= 0 or not required.issubset(names):
-            p.error("--sign-lookback requires a positive duration and both speedbreaker and warning_sign")
+            parser.error("--sign-lookback requires a positive duration and both speedbreaker and warning_sign")
     if args.output.suffix.lower() != ".csv" or args.workers < 1:
-        p.error("--output needs a .csv filename and --workers must be positive")
-    cv2.setNumThreads(1)
-    cache = MotionCache(args.motion_cache) if args.motion_cache else None
-    run = AnalysisRun(names, cache=cache, hwaccel=args.hwaccel, sign_lookback=args.sign_lookback,
-                      work_dir=args.work_dir, preprocess_cache=args.preprocess_cache)
+        parser.error("--output needs a .csv filename and --workers must be positive")
     try:
         videos = FrontClips.resolve(args.inputs)
     except ValueError as err:
-        p.error(str(err))
+        parser.error(str(err))
+    return names, videos
+
+
+def preprocess_videos(videos: Sequence[Path], names: Sequence[DetectorName], args: argparse.Namespace,
+                      pool: ThreadPoolExecutor) -> list[ProcessedVideo]:
+    cache = MotionCache(args.motion_cache) if args.motion_cache else None
+    preprocessor = VideoPreprocessor(args.work_dir, args.preprocess_cache, include_motion=DetectorName.SPEEDBREAKER in names,
+                                     motion_cache=cache, hwaccel=args.hwaccel)
+    futures = [pool.submit(preprocessor.process, video) for video in videos]
+    with tqdm(total=len(videos), desc="Preprocessing", unit="video", file=sys.stdout) as progress:
+        for future in as_completed(futures):
+            future.result()
+            progress.update(1)
+    # Keep detection and CSV output in input order.
+    return [future.result() for future in futures]
+
+
+def main(argv: Sequence[str] | None = None):
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(levelname)s %(message)s")
+    logger.info("Parsing arguments")
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    logger.info("Arguments parsed successfully")
+    logger.info("Checking inputs")
+    names, videos = check_prerequisites(args, parser)
+    logger.info("Found %d %s", len(videos), "video" if len(videos) == 1 else "videos")
+
+    cv2.setNumThreads(1)
+    run = AnalysisRun(names, sign_lookback=args.sign_lookback)
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        def results() -> Iterator[list[ScanResult]]:
-            for i, per_video in enumerate(pool.map(run.scan, videos), 1):
-                print(f"[{i}/{len(videos)}] {videos[i-1].name}", flush=True)
-                yield per_video
-        events, clips = run.save(results(), args.output)
+        logger.info("Starting preprocessing")
+        processed = preprocess_videos(videos, names, args, pool)
+        logger.info("Running detectors")
+        results = run.scan_videos(processed, pool)
+
+    logger.info("Saving results to %s", args.output)
+    events, clips = run.save(results, args.output)
     if args.review:
         from visualize.review import ReviewPage
+        logger.info("Writing review page to %s", args.review)
         ReviewPage.write(args.review, events, clips)
-    print(f"{len(events)} detections across {len(videos)} clips. Saved {args.output}")
+    logger.info("Scan complete. Saved %d detections to %s", len(events), args.output)
