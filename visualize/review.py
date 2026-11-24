@@ -21,7 +21,8 @@ class ReviewPage:
         sources = {c["filename"]: c["file_path"] for c in clips}
         entries = [dict(filename=r["filename"], url=Path(r["file_path"]).as_uri(), event=r["event"],
                         t=float(r["peak_s"]), score=r["score"], speed=r.get("speed_kmh"),
-                        box=r.get("box", ""), range="", result="") for r in events]
+                        box=r.get("box", ""), range=f"{r['start_s']}–{r['end_s']}" if r.get("end_s") else "",
+                        result="") for r in events]
         annotation_status = {}
         if annotations:
             from analyse.evaluate import GoldenSet

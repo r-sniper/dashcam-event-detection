@@ -9,12 +9,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, fields
 from datetime import datetime
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import NotRequired, TypedDict, cast
 
 import cv2
 from tqdm import tqdm
 
 from .common import Detection, DetectorName, FrontClips
+from .compilation import SpeedbreakerCompilation
 from .preprocess import DEFAULT_WORK_DIR, ProcessedVideo, VideoPreprocessor
 from .signals import MotionCache
 from .speedbreaker import SpeedbreakerDetector
@@ -36,6 +37,8 @@ class EventRow(EncounterField):
     event: str
     peak_s: float
     score: float
+    start_s: NotRequired[float]
+    end_s: NotRequired[float]
 
 
 class ClipRow(TypedDict):
@@ -158,6 +161,9 @@ class AnalysisRun:
         events.sort(key=lambda e: (e["file_path"], e["peak_s"], e["event"]))
         cls.write_table(output, cls.event_fields, events)
         cls.write_table(output.with_suffix(".clips.csv"), cls.clip_fields, clips)
+        intervals = [(Path(e["file_path"]), e["start_s"], e["end_s"])
+                     for e in events if e["event"] == DetectorName.SPEEDBREAKER]
+        SpeedbreakerCompilation.write(output.with_suffix(".speedbreakers.mp4"), intervals)
         return events, clips
 
 
