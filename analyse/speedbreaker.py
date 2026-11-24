@@ -14,7 +14,7 @@ from .preprocess import ProcessedVideo
 from .signals import CameraMotion, GpsTrace, ScanWindows
 
 
-PRE_ROLL_S = 3.0
+PRE_ROLL_S = 2.0
 POST_ROLL_S = 2.0
 
 
