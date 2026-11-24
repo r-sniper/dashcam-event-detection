@@ -9,7 +9,7 @@ from unittest.mock import patch
 import numpy as np
 
 from .common import DetectorName
-from .compilation import SpeedbreakerCompilation
+from .compilation import SourceStreams, SpeedbreakerCompilation
 from .run import AnalysisRun
 from .signals import CameraMotion, GpsTrace
 from .speedbreaker import SpeedbreakerDetection, SpeedbreakerDetector
@@ -37,10 +37,11 @@ class SpeedbreakerOutputTests(unittest.TestCase):
             results = []
             for name, color in [("bF", "blue"), ("aF", "red")]:
                 source = root / f"{name}.mp4"
-                frames = f"color=black:s=64x48:r=30:d=1,drawbox=color={color}:t=fill:enable='gte(t,0.5)'"
-                audio = ["-f", "lavfi", "-i", "sine=duration=1"] if name == "bF" else []
-                subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", frames, *audio, str(source)], check=True)
-                crossing = SpeedbreakerDetection("speedbreaker", .65, 2., 3., 15., start_s=.5, end_s=.9)
+                frames = f"color=black:s=64x48:r=25:d=1,drawbox=color={color}:t=fill:enable='gte(t,0.5)'"
+                audio = ["-f", "lavfi", "-i", "sine=sample_rate=16000:duration=1"] if name == "bF" else []
+                subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", frames, *audio,
+                                "-c:v", "mpeg4", str(source)], check=True)
+                crossing = SpeedbreakerDetection("speedbreaker", .65, 2., 3., 15., start_s=.52, end_s=.92)
                 results.append([AnalysisRun.record(source, DetectorName.SPEEDBREAKER, "full", 1., 1., [crossing])])
             sign = WarningSignDetection("possible_speedbreaker_sign", .1, .8, "")
             sign_result = AnalysisRun.record(root / "aF.mp4", DetectorName.WARNING_SIGN, "full", 1., 1., [sign])
@@ -51,22 +52,32 @@ class SpeedbreakerOutputTests(unittest.TestCase):
             with output.open(newline="") as table:
                 rows = list(csv.DictReader(table))
             self.assertEqual([(r["filename"], r["start_s"], r["end_s"]) for r in rows],
-                             [("aF.mp4", "", ""), ("aF.mp4", "0.5", "0.9"), ("bF.mp4", "0.5", "0.9")])
+                             [("aF.mp4", "", ""), ("aF.mp4", "0.52", "0.92"), ("bF.mp4", "0.52", "0.92")])
 
             video = output.with_suffix(".speedbreakers.mp4")
             self.assertFalse(video.exists())
             SpeedbreakerCompilation.compile_output(output)
+            streams = SourceStreams.read(video)
+            self.assertEqual([streams.video[k] for k in ("codec_name", "width", "height", "avg_frame_rate")],
+                             ["mpeg4", 64, 48, "25/1"])
+            assert streams.audio is not None
+            self.assertEqual([streams.audio[k] for k in ("codec_name", "sample_rate", "channels")], ["aac", "16000", 1])
             decode = ["ffmpeg", "-v", "error", "-i", str(video)]
             rgb = subprocess.check_output([*decode, "-vf", "crop=2:2,scale=1:1", "-pix_fmt", "rgb24",
                                            "-f", "rawvideo", "pipe:1"])
             colors = np.frombuffer(rgb, dtype=np.uint8).reshape(-1, 3)
-            self.assertEqual(len(colors), 24)
-            self.assertTrue(np.all(colors[:12, 0] > 240))
-            self.assertTrue(np.all(colors[12:, 2] > 240))
+            self.assertEqual(len(colors), 20)
+            self.assertTrue(np.all(colors[:10, 0] > 240))
+            self.assertTrue(np.all(colors[10:, 2] > 240))
             pcm = subprocess.check_output([*decode, "-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1"])
             samples = np.frombuffer(pcm, dtype="<i2")
             self.assertEqual(np.abs(samples[800:2400]).max(), 0)
             self.assertGreater(np.abs(samples[4000:5600]).max(), 1000)
+
+            muted_events, muted_clip = results[-1][0]
+            AnalysisRun.save(muted_events, [muted_clip], output)
+            SpeedbreakerCompilation.compile_output(output)
+            self.assertIsNone(SourceStreams.read(video).audio)
 
             sign_events, sign_clip = sign_result
             AnalysisRun.save(sign_events, [sign_clip], output)

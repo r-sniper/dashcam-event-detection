@@ -15,7 +15,7 @@ Open `visualize/events.html` to jump to detections in the original footage. The 
 
 Each speedbreaker row also reports `start_s` and `end_s` in seconds from the start of its source clip. The interval covers the motion samples behind consecutive above-threshold scores around `peak_s`, bounded by the scan window and the midpoints to neighboring peaks.
 
-After saving the CSV, the scan joins those intervals in CSV order into `events.speedbreakers.mp4` beside it. The compilation uses 720p video at 30 fps and includes the source audio when available. A run with zero crossings clears any previous compilation for that output name.
+After saving the CSV, the scan joins those intervals in CSV order into `events.speedbreakers.mp4` beside it. It re-encodes each cut with the source video codec, resolution and frame timing so crossings can start between keyframes. Clips in one compilation must share a video codec, resolution and pixel format. The first clip with audio supplies the output audio codec, sample rate and channel layout. Muted clips receive silence only when the compilation includes audio. A run with zero crossings clears any previous compilation for that output name.
 
 Each run prepares a `ProcessedVideo` directly from each MP4 before detection. It contains container and stream metadata, timestamped GPS coordinates, speed and heading. Speedbreaker runs also measure camera motion at 10 Hz. The speedbreaker detector requires motion samples and at least one GPS speed aligned to the clip. A GPS gap can leave an individual crossing's speed empty. Warning-sign detection only needs the video frames and duration.
 
