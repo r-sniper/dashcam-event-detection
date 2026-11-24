@@ -34,6 +34,7 @@ class SpeedbreakerCompilation:
         path = events_csv.with_suffix(".speedbreakers.mp4")
         if not intervals:
             path.unlink(missing_ok=True)
+            logger.info("Skipping compilation because %s contains no speedbreaker events", events_csv)
             return
 
         logger.info("Compiling %d speedbreaker clips to %s", len(intervals), path)
@@ -50,3 +51,4 @@ class SpeedbreakerCompilation:
                             "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", video.name],
                            cwd=folder, check=True)
             video.replace(path)
+        logger.info("Saved speedbreaker compilation to %s", path)
