@@ -16,3 +16,13 @@ Open `visualize/events.html` to jump to detections in the original footage. The 
 Each run prepares a `ProcessedVideo` directly from each MP4 before detection. It contains container and stream metadata, timestamped GPS coordinates, speed and heading. Speedbreaker runs also measure camera motion at 10 Hz. The speedbreaker detector requires motion samples and at least one GPS speed aligned to the clip. A GPS gap can leave an individual crossing's speed empty. Warning-sign detection only needs the video frames and duration.
 
 Preprocessing writes one archive per clip and extraction configuration under `.speedbreaker-work/preprocessed/`. By default each run refreshes the archive. Add `--preprocess-cache` to reuse it when the source path, size, modification time, preprocessing version and extraction settings match. Use `--work-dir PATH` to choose another working directory. The existing `--motion-cache PATH` flag can still reuse optical flow independently.
+
+## Contributing
+
+Submit every change through a pull request. Describe what changed and how you tested it. Every pull request requires approval from [Rahul Shah (@r-sniper)](https://github.com/r-sniper) before it can be merged.
+
+## License and citation
+
+This project uses the [MIT License](LICENSE). If you use it in published work, please cite the software.
+
+> Shah, Rahul (2026). *Dashcam event detection* [Software]. [GitHub repository](https://github.com/r-sniper/dashcam-event-detection).
