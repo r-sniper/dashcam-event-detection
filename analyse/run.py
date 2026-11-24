@@ -15,6 +15,7 @@ import cv2
 from tqdm import tqdm
 
 from .common import Detection, DetectorName, FrontClips
+from .compilation import SpeedbreakerCompilation
 from .preprocess import DEFAULT_WORK_DIR, ProcessedVideo, VideoPreprocessor
 from .signals import MotionCache
 from .speedbreaker import SpeedbreakerDetector
@@ -148,7 +149,7 @@ class AnalysisRun:
         os.replace(f.name, path)
 
     @classmethod
-    def save(cls, results: Iterable[list[ScanResult]], output: Path) -> tuple[list[EventRow], list[ClipRow]]:
+    def collect_results(cls, results: Iterable[list[ScanResult]]) -> tuple[list[EventRow], list[ClipRow]]:
         events, clips = [], []
         for per_video in results:
             for found, clip in per_video:
@@ -156,9 +157,12 @@ class AnalysisRun:
                 clips.append(clip)
         cls.assign_ids(events, clips)
         events.sort(key=lambda e: (e["file_path"], e["peak_s"], e["event"]))
+        return events, clips
+
+    @classmethod
+    def save(cls, events: Sequence[EventRow], clips: Sequence[ClipRow], output: Path):
         cls.write_table(output, cls.event_fields, events)
         cls.write_table(output.with_suffix(".clips.csv"), cls.clip_fields, clips)
-        return events, clips
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -232,8 +236,10 @@ def main(argv: Sequence[str] | None = None):
         logger.info("Running detectors")
         results = run.scan_videos(processed, pool)
 
+    events, clips = run.collect_results(results)
     logger.info("Saving results to %s", args.output)
-    events, clips = run.save(results, args.output)
+    run.save(events, clips, args.output)
+    SpeedbreakerCompilation.compile_output(args.output)
     if args.review:
         from visualize.review import ReviewPage
         logger.info("Writing review page to %s", args.review)

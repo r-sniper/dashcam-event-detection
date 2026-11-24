@@ -14,10 +14,18 @@ from .preprocess import ProcessedVideo
 from .signals import CameraMotion, GpsTrace, ScanWindows
 
 
+PRE_ROLL_S = 2.0
+POST_ROLL_S = 2.0
+
+
 @dataclass
 class SpeedbreakerDetection(Detection):
     bounce_px: float
     speed_kmh: float | None
+    start_s: float
+    end_s: float
+    buffered_start_s: float
+    buffered_end_s: float
 
 
 class SpeedbreakerDetector:
@@ -26,17 +34,18 @@ class SpeedbreakerDetector:
     # Lowest threshold tied for best event-level F2 on the 13 November guide clips.
     threshold = 1.95
     separation_s = 5
+    bounce_samples = 13
 
     def __init__(self, scan_mode: str = "full"):
         self.scan_mode = scan_mode
 
-    @staticmethod
-    def measure(motion: NDArray[np.float64], gps: GpsTrace) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    @classmethod
+    def measure(cls, motion: NDArray[np.float64], gps: GpsTrace) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         t, vertical, _, quality = motion.T
         smoothed = gaussian_filter1d(np.clip(vertical, -20, 20), .8)
         pitch = smoothed - median_filter(vertical, 21, mode="nearest")
-        up = np.maximum(0, maximum_filter1d(pitch, 13))
-        down = np.maximum(0, -minimum_filter1d(pitch, 13))
+        up = np.maximum(0, maximum_filter1d(pitch, cls.bounce_samples))
+        down = np.maximum(0, -minimum_filter1d(pitch, cls.bounce_samples))
         bounce = np.sqrt(up * down)
         # Weak RANSAC consensus often means the camera was following a moving object.
         bounce *= np.clip(median_filter(quality, 5) / .50, 0, 1)
@@ -52,7 +61,23 @@ class SpeedbreakerDetector:
                  + .50 * np.nan_to_num(crossing_brake, nan=.20))
         return bounce, np.log1p(bounce) + prior
 
-    def score_windows(self, chunks: Iterable[NDArray[np.float64]], gps: GpsTrace) -> list[SpeedbreakerDetection]:
+    @classmethod
+    def event_range(cls, times: NDArray[np.float64], score: NDArray[np.float64],
+                    peak: int, left: int, right: int) -> tuple[float, float]:
+        first = last = peak
+        while first > left and score[first - 1] >= cls.threshold:
+            first -= 1
+        while last < right and score[last + 1] >= cls.threshold:
+            last += 1
+        # Include the motion samples used to score the crossing. Times are sample centers.
+        radius = cls.bounce_samples // 2
+        half_sample = .5 / CameraMotion.fps
+        start = times[max(left, first - radius)] - half_sample
+        end = times[min(right, last + radius)] + half_sample
+        return max(0., round(float(start), 2)), round(float(end), 2)
+
+    def score_windows(self, chunks: Iterable[NDArray[np.float64]], gps: GpsTrace,
+                      duration: float) -> list[SpeedbreakerDetection]:
         candidates = []
         for motion in chunks:
             if len(motion) < 3:
@@ -61,13 +86,20 @@ class SpeedbreakerDetector:
             # Padding retains peaks at the beginning and end of a recording.
             peaks, _ = find_peaks(np.r_[-np.inf, score, -np.inf], height=self.threshold,
                                   distance=self.separation_s * CameraMotion.fps)
-            for i in peaks - 1:
+            peaks -= 1
+            # Split sustained motion midway between distinct peaks.
+            splits = (peaks[:-1] + peaks[1:] + 1) // 2
+            for i, left, right in zip(peaks, np.r_[0, splits], np.r_[splits, len(motion)]):
+                start, end = self.event_range(motion[:, 0], score, int(i), int(left), int(right) - 1)
                 t = float(motion[i, 0])
                 speed = gps.at(t)
                 candidates.append(self.result_type(
                     event=self.name.value, peak_s=round(t, 2), score=round(float(score[i]), 3),
                     bounce_px=round(float(bounce[i]), 3),
                     speed_kmh=round(float(speed), 1) if np.isfinite(speed) else None,
+                    start_s=start, end_s=end,
+                    buffered_start_s=max(0., round(start - PRE_ROLL_S, 2)),
+                    buffered_end_s=min(duration, round(end + POST_ROLL_S, 2)),
                 ))
         # Adjacent search windows can contain the same bounce at their edges.
         kept = []
@@ -84,7 +116,7 @@ class SpeedbreakerDetector:
         if not np.any((gps.seconds >= 0) & (gps.seconds <= video.duration)):
             raise ValueError(f"{video.path.name}: speedbreaker requires GPS speed samples aligned to the clip")
         if self.scan_mode == "full":
-            return self.score_windows([motion], gps), video.duration
+            return self.score_windows([motion], gps, video.duration), video.duration
         windows = ScanWindows.guided(gps, video.duration)
         chunks = (motion[(motion[:, 0] >= a) & (motion[:, 0] < b)] for a, b in windows)
-        return self.score_windows(chunks, gps), sum(b - a for a, b in windows)
+        return self.score_windows(chunks, gps, video.duration), sum(b - a for a, b in windows)
