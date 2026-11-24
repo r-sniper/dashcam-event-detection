@@ -1,10 +1,12 @@
 """Join detected crossing intervals in event CSV order."""
 
+import csv
 import logging
 import subprocess
-from collections.abc import Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+from .common import DetectorName
 
 
 logger = logging.getLogger(__name__)
@@ -25,7 +27,11 @@ class SpeedbreakerCompilation:
         ], check=True)
 
     @classmethod
-    def write(cls, path: Path, intervals: Sequence[tuple[Path, float, float]]):
+    def compile_output(cls, events_csv: Path):
+        with events_csv.open(encoding="utf-8", newline="") as table:
+            intervals = [(Path(row["file_path"]), float(row["start_s"]), float(row["end_s"]))
+                         for row in csv.DictReader(table) if row["event"] == DetectorName.SPEEDBREAKER]
+        path = events_csv.with_suffix(".speedbreakers.mp4")
         if not intervals:
             path.unlink(missing_ok=True)
             return

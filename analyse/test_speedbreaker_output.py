@@ -9,6 +9,7 @@ from unittest.mock import patch
 import numpy as np
 
 from .common import DetectorName
+from .compilation import SpeedbreakerCompilation
 from .run import AnalysisRun
 from .signals import CameraMotion, GpsTrace
 from .speedbreaker import SpeedbreakerDetection, SpeedbreakerDetector
@@ -45,13 +46,16 @@ class SpeedbreakerOutputTests(unittest.TestCase):
             sign_result = AnalysisRun.record(root / "aF.mp4", DetectorName.WARNING_SIGN, "full", 1., 1., [sign])
             results[-1].append(sign_result)
             output = root / "events.csv"
-            AnalysisRun.save(results, output)
+            events, clips = AnalysisRun.collect_results(results)
+            AnalysisRun.save(events, clips, output)
             with output.open(newline="") as table:
                 rows = list(csv.DictReader(table))
             self.assertEqual([(r["filename"], r["start_s"], r["end_s"]) for r in rows],
                              [("aF.mp4", "", ""), ("aF.mp4", "0.5", "0.9"), ("bF.mp4", "0.5", "0.9")])
 
             video = output.with_suffix(".speedbreakers.mp4")
+            self.assertFalse(video.exists())
+            SpeedbreakerCompilation.compile_output(output)
             decode = ["ffmpeg", "-v", "error", "-i", str(video)]
             rgb = subprocess.check_output([*decode, "-vf", "crop=2:2,scale=1:1", "-pix_fmt", "rgb24",
                                            "-f", "rawvideo", "pipe:1"])
@@ -64,5 +68,8 @@ class SpeedbreakerOutputTests(unittest.TestCase):
             self.assertEqual(np.abs(samples[800:2400]).max(), 0)
             self.assertGreater(np.abs(samples[4000:5600]).max(), 1000)
 
-            AnalysisRun.save([[sign_result]], output)
+            sign_events, sign_clip = sign_result
+            AnalysisRun.save(sign_events, [sign_clip], output)
+            self.assertTrue(video.exists())
+            SpeedbreakerCompilation.compile_output(output)
             self.assertFalse(video.exists())
