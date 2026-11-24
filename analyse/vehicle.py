@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 import math
 import re
 import sys
 from collections import Counter
-from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
-from time import monotonic
 from typing import TYPE_CHECKING, cast
 
 import cv2
@@ -24,9 +21,6 @@ from .preprocess import ProcessedVideo, VideoFrame
 if TYPE_CHECKING:
     from open_image_models.detection.core.base import BoundingBox, DetectionResult
     from rapidocr.utils.output import RapidOCROutput
-
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -94,7 +88,6 @@ class VehicleDetector:
     name = DetectorName.VEHICLE
     result_type = VehicleDetection
     fps = 4
-    progress_interval_s = 5
     labels = {"car", "motorcycle", "bus", "truck"}
 
     def __init__(self):
@@ -182,30 +175,14 @@ class VehicleDetector:
                     vehicles.append(v)
         return vehicles
 
-    @classmethod
-    def scan_frames(cls, video: ProcessedVideo) -> Iterator[VideoFrame]:
-        frames = video.native_frames(cls.fps)
-        if sys.stdout.isatty():
-            with tqdm(frames, desc=f"{cls.name} {video.path.name}", total=math.ceil(video.duration * cls.fps),
-                      unit="frame", file=sys.stdout, mininterval=1, miniters=1, leave=False) as progress:
-                yield from progress
-            return
-        next_update = monotonic() + cls.progress_interval_s
-        for count, frame in enumerate(frames, 1):
-            yield frame
-            now = monotonic()
-            if now >= next_update:
-                scanned = min(video.duration, frame.timestamp_s + 1 / cls.fps)
-                logger.info("%s on %s | %.1f/%.1f s of footage (%.0f%%), %d frames processed",
-                            cls.name, video.path.name, scanned, video.duration, 100 * scanned / video.duration, count)
-                next_update = now + cls.progress_interval_s
-
     def detect(self, video: ProcessedVideo) -> tuple[list[VehicleDetection], float]:
         if not video.has_video_stream:
             raise ValueError(f"{video.path.name}: vehicle requires a video stream")
         active: list[VehicleTrack] = []
         completed = []
-        for frame in self.scan_frames(video):
+        for frame in tqdm(video.native_frames(self.fps), desc=f"{self.name} {video.path.name}",
+                          total=math.ceil(video.duration * self.fps), unit="frame", file=sys.stdout,
+                          leave=False, disable=None):
             t = frame.timestamp_s
             completed.extend(tr.result() for tr in active if t - tr.end > 1.)
             active = [tr for tr in active if t - tr.end <= 1.]

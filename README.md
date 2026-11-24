@@ -67,7 +67,7 @@ To detect vehicles and read Indian registration plates, run the scan with the ve
 uv run --extra vehicle analyze.py videos/sample --detect vehicle
 ```
 
-The scan lists the selected detectors and logs when each starts and finishes on a clip. In a terminal, progress bars show completed clips and sampled frames for each active vehicle scan, with an estimated time remaining. Redirected logs report vehicle progress about every five seconds as frames finish.
+The scan lists the selected detectors and logs when each starts and finishes on a clip. In a terminal, progress bars show completed clips and sampled frames for each active vehicle scan, with an estimated time remaining.
 
 ## Contributing
 
