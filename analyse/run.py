@@ -2,6 +2,7 @@ import argparse
 import csv
 import logging
 import os
+import shutil
 import sys
 import tempfile
 from collections.abc import Collection, Iterable, Mapping, Sequence
@@ -185,29 +186,41 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def check_prerequisites(args: argparse.Namespace, parser: argparse.ArgumentParser) -> tuple[list[DetectorName], list[Path]]:
+def build_args(parser: argparse.ArgumentParser, argv: Sequence[str] | None) -> argparse.Namespace:
+    args = parser.parse_args(argv)
     requested = list(dict.fromkeys(n.strip() for n in args.detect.split(",")))
     unknown = set(requested) - AnalysisRun.detectors.keys()
     if unknown:
         parser.error(f"Unknown detector(s): {', '.join(sorted(unknown))}. Available: {', '.join(AnalysisRun.detectors)}")
-    names = [DetectorName(name) for name in requested]
+    args.detect = [DetectorName(name) for name in requested]
     if args.sign_lookback is not None:
         required = {DetectorName.SPEEDBREAKER, DetectorName.WARNING_SIGN}
-        if args.sign_lookback <= 0 or not required.issubset(names):
+        if not (args.sign_lookback > 0 and required.issubset(args.detect)):
             parser.error("--sign-lookback requires a positive duration and both speedbreaker and warning_sign")
-    if args.output.suffix.lower() != ".csv" or args.workers < 1:
-        parser.error("--output needs a .csv filename and --workers must be positive")
+    if args.output.suffix.lower() != ".csv":
+        parser.error("--output needs a .csv filename")
+    if args.workers < 1:
+        parser.error("--workers must be positive")
+    return args
+
+
+def check_prerequisites(inputs: Sequence[Path], parser: argparse.ArgumentParser) -> list[Path]:
     try:
-        videos = FrontClips.resolve(args.inputs)
+        videos = FrontClips.resolve(inputs)
     except ValueError as err:
         parser.error(str(err))
-    return names, videos
+    missing = [tool for tool in ("ffmpeg", "ffprobe", "exiftool") if shutil.which(tool) is None]
+    if missing:
+        parser.error(f"Missing from PATH: {', '.join(missing)}. See the README prerequisites for installation: "
+                     "https://github.com/r-sniper/dashcam-event-detection#prerequisites")
+    return videos
 
 
-def preprocess_videos(videos: Sequence[Path], names: Sequence[DetectorName], args: argparse.Namespace,
+def preprocess_videos(videos: Sequence[Path], args: argparse.Namespace,
                       pool: ThreadPoolExecutor) -> list[ProcessedVideo]:
     cache = MotionCache(args.motion_cache) if args.motion_cache else None
-    preprocessor = VideoPreprocessor(args.work_dir, args.preprocess_cache, include_motion=DetectorName.SPEEDBREAKER in names,
+    preprocessor = VideoPreprocessor(args.work_dir, args.preprocess_cache,
+                                     include_motion=DetectorName.SPEEDBREAKER in args.detect,
                                      motion_cache=cache, hwaccel=args.hwaccel)
     futures = [pool.submit(preprocessor.process, video) for video in videos]
     with tqdm(total=len(videos), desc="Preprocessing", unit="video", file=sys.stdout) as progress:
@@ -222,17 +235,17 @@ def main(argv: Sequence[str] | None = None):
     logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(levelname)s %(message)s")
     logger.info("Parsing arguments")
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = build_args(parser, argv)
     logger.info("Arguments parsed successfully")
-    logger.info("Checking inputs")
-    names, videos = check_prerequisites(args, parser)
+    logger.info("Checking prerequisites")
+    videos = check_prerequisites(args.inputs, parser)
     logger.info("Found %d %s", len(videos), "video" if len(videos) == 1 else "videos")
 
     cv2.setNumThreads(1)
-    run = AnalysisRun(names, sign_lookback=args.sign_lookback)
+    run = AnalysisRun(args.detect, sign_lookback=args.sign_lookback)
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         logger.info("Starting preprocessing")
-        processed = preprocess_videos(videos, names, args, pool)
+        processed = preprocess_videos(videos, args, pool)
         logger.info("Running detectors")
         results = run.scan_videos(processed, pool)
 
