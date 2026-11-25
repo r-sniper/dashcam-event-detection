@@ -6,7 +6,6 @@ import shutil
 import sys
 import tempfile
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, fields
 from datetime import datetime
 from pathlib import Path
@@ -104,12 +103,9 @@ class AnalysisRun:
             results.append(self.record(video.path, detector.name, mode, video.duration, inspected, events))
         return results
 
-    def scan_videos(self, videos: Sequence[ProcessedVideo], pool: ThreadPoolExecutor) -> list[list[ScanResult]]:
-        results = []
-        for i, per_video in enumerate(pool.map(self.run_detectors, videos), 1):
-            logger.info("[%d/%d] Scanned %s", i, len(videos), videos[i - 1].path.name)
-            results.append(per_video)
-        return results
+    def scan_videos(self, videos: Sequence[ProcessedVideo], workers: int) -> list[list[ScanResult]]:
+        return thread_map(self.run_detectors, videos, max_workers=workers,
+                          desc="Detection", unit="video", file=sys.stdout)
 
     @staticmethod
     def assign_ids(events: Sequence[EventRow], clips: Sequence[ClipRow]):
@@ -244,8 +240,7 @@ def main(argv: Sequence[str] | None = None):
     run = AnalysisRun(args.detect, sign_lookback=args.sign_lookback, motion_cache=motion_cache, hwaccel=args.hwaccel)
     workers = min(len(processed), args.workers or 2)
     logger.info("Running detectors (workers=%d)", workers)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = run.scan_videos(processed, pool)
+    results = run.scan_videos(processed, workers)
 
     events, clips = run.collect_results(results)
     logger.info("Saving results to %s", args.output)
