@@ -61,6 +61,14 @@ uv run analyze.py videos/sample --detect speedbreaker,warning_sign
 
 Add `--review review.html` for a clickable event list. Run `uv run analyze.py --help` for all options.
 
+To detect vehicles and read Indian registration plates, run the scan with the vehicle extra.
+
+```sh
+uv run --extra vehicle analyze.py videos/sample --detect vehicle
+```
+
+The scan lists the selected detectors and logs when each starts and finishes on a clip. In a terminal, progress bars show completed clips and sampled frames for each active vehicle scan, with an estimated time remaining.
+
 ## Contributing
 
 Submit every change through a pull request. Describe what changed and how you tested it. Every pull request requires approval from [Rahul Shah (@r-sniper)](https://github.com/r-sniper) before it can be merged.

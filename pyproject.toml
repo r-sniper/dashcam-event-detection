@@ -10,6 +10,12 @@ dependencies = [
     "tqdm>=4.66,<5",
 ]
 
+[project.optional-dependencies]
+vehicle = [
+    "open-image-models[onnx]>=0.6,<0.7",
+    "rapidocr>=3.10,<4 ; python_full_version < '4'",
+]
+
 [dependency-groups]
 dev = [
     "numpy-typing-compat==20260602.2.5",
