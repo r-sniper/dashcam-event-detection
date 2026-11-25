@@ -139,8 +139,6 @@ class ProcessedVideo:
 
 
 class VideoPreprocessor:
-    version = 3
-
     def __init__(self, work_dir: Path = DEFAULT_WORK_DIR, reuse_cache: bool = False):
         self.folder = work_dir / "preprocessed"
         self.reuse_cache = reuse_cache
@@ -148,7 +146,7 @@ class VideoPreprocessor:
     def process(self, video: Path) -> ProcessedVideo:
         video = video.resolve()
         stat = video.stat()
-        identity = (self.version, str(video), stat.st_size, stat.st_mtime_ns)
+        identity = (str(video), stat.st_size, stat.st_mtime_ns)
         key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:16]
         target = self.folder / f"{video.stem}.{key}.npz"
         if self.reuse_cache and target.is_file():
