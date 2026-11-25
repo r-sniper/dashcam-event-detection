@@ -23,7 +23,8 @@ class PreprocessingTests(unittest.TestCase):
             video = root / "exampleF.MP4"
             video.touch()
             processed = ProcessedVideo(video, 10., True, [], None)
-            with (patch.object(VideoPreprocessor, "process", return_value=processed) as preprocess,
+            with (patch("analyse.run.shutil.which", return_value="installed"),
+                  patch.object(VideoPreprocessor, "process", return_value=processed) as preprocess,
                   patch.object(SpeedbreakerDetector, "detect", return_value=([], 10.)) as crossings,
                   patch.object(WarningSignDetector, "detect", return_value=([], 10.)) as signs):
                 main([str(root), str(video), "--detect", "speedbreaker,warning_sign", "--output", str(root / "events.csv")])
