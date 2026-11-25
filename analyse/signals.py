@@ -3,8 +3,10 @@
 import hashlib
 import os
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import BinaryIO, cast
 
@@ -13,6 +15,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.ndimage import median_filter
 from scipy.signal import find_peaks
+from tqdm.auto import tqdm
 
 
 @dataclass
@@ -61,7 +64,7 @@ class CameraMotion:
 
     @classmethod
     def read(cls, video: Path, start: float = 0., end: float | None = None,
-             hwaccel: str | None = None) -> NDArray[np.float64]:
+             hwaccel: str | None = None, *, duration: float | None = None) -> NDArray[np.float64]:
         command = ["ffmpeg", "-v", "error", "-nostdin", "-threads", "3"]
         filters = [f"fps={cls.fps}"]
         if hwaccel == "d3d11va":
@@ -75,9 +78,13 @@ class CameraMotion:
                     "-filter_threads", "1", "-pix_fmt", "gray", "-f", "rawvideo", "pipe:1"]
         motion = []
         previous = None
+        stop = end if end is not None else duration
+        total_frames = round((stop - start) * cls.fps) if stop is not None else None
         with subprocess.Popen(command, stdout=subprocess.PIPE) as process:
             frames = cast(BinaryIO, process.stdout)
-            while data := frames.read(cls.height * cls.width):
+            frame_data = iter(partial(frames.read, cls.height * cls.width), b"")
+            for data in tqdm(frame_data, total=total_frames, desc=f"  Motion {video.name}",
+                             unit="frame", leave=False, file=sys.stdout, disable=None):
                 frame = np.frombuffer(data, np.uint8).reshape(cls.height, cls.width)
                 current = frame[int(cls.height * .12):int(cls.height * .71)]
                 if previous is not None:
@@ -120,9 +127,9 @@ class ScanWindows:
 class MotionCache:
     """Reuse expensive full-clip optical flow when scoring or annotations change."""
 
-    def __init__(self, folder: str | Path):
+    def __init__(self, folder: str | Path, *, reuse: bool = True):
         self.folder = Path(folder)
-        self.folder.mkdir(parents=True, exist_ok=True)
+        self.reuse = reuse
 
     def path(self, video: Path) -> Path:
         stat = video.stat()
@@ -132,15 +139,16 @@ class MotionCache:
 
     def store(self, video: Path, motion: NDArray[np.float64]):
         target = self.path(video)
+        self.folder.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=self.folder, suffix=".tmp", delete=False) as f:
             np.savez_compressed(f, motion=motion)
         os.replace(f.name, target)
 
-    def read(self, video: Path, hwaccel: str | None = None) -> NDArray[np.float64]:
+    def read(self, video: Path, hwaccel: str | None = None, *, duration: float | None = None) -> NDArray[np.float64]:
         target = self.path(video)
-        if target.exists():
+        if self.reuse and target.exists():
             with np.load(target) as data:
                 return data["motion"]
-        motion = CameraMotion.read(video, hwaccel=hwaccel)
+        motion = CameraMotion.read(video, hwaccel=hwaccel, duration=duration)
         self.store(video, motion)
         return motion

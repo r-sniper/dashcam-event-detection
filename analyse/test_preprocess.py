@@ -1,13 +1,19 @@
 import json
 import unittest
+from argparse import Namespace
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from threading import Event
+from unittest.mock import call, patch
 
 import numpy as np
+from tqdm.contrib.concurrent import thread_map
 
-from .preprocess import FFprobeResult, ProcessedVideo, VideoPreprocessor
-from .run import main
+from .preprocess import FFprobeResult, GpsSample, ProcessedVideo, VideoPreprocessor
+from .run import AnalysisRun, main, preprocess_videos
+from .signals import CameraMotion
 from .speedbreaker import SpeedbreakerDetector
 from .warning_sign import WarningSignDetector
 
@@ -17,12 +23,63 @@ class PreprocessingTests(unittest.TestCase):
     telemetry = ("gps_timestamp_utc,latitude_deg,longitude_deg,speed_kmh,heading_deg\n"
                  "2026:11:13 01:14:14Z,17.61,78.13,42.5,356.6\n")
 
+    def test_preprocessing_displays_completions_while_first_clip_is_busy(self):
+        videos = [Path(f"{i}F.MP4") for i in range(5)]
+        hits_displayed = Event()
+
+        class ProgressOutput(StringIO):
+            def write(self, text: str) -> int:
+                written = super().write(text)
+                if "4/5" in text:
+                    hits_displayed.set()
+                return written
+
+        def process(video: Path) -> ProcessedVideo:
+            if video == videos[0]:
+                self.assertTrue(hits_displayed.wait(5), "Four completions should be visible before clip 0 finishes")
+            return ProcessedVideo(video, 10., True, [])
+
+        output = ProgressOutput()
+        args = Namespace(work_dir=Path("."), preprocess_cache=True, workers=2)
+        with redirect_stdout(output), patch.object(VideoPreprocessor, "process", side_effect=process):
+            results = preprocess_videos(videos, args)
+        for completed in range(1, len(videos) + 1):
+            self.assertIn(f"{completed}/5", output.getvalue())
+        self.assertEqual([result.path for result in results], videos)
+
+    def test_cli_sizes_each_pool_for_its_workload(self):
+        cases = [
+            # CPUs, clips, detectors, CLI options, preprocessing workers, detection workers
+            (4, 10, "speedbreaker", [], 4, 2),
+            (16, 10, "speedbreaker,warning_sign", [], 8, 2),
+            (16, 10, "warning_sign", [], 8, 2),
+            (1, 1, "speedbreaker,warning_sign", [], 1, 1),
+            (2, 10, "speedbreaker", ["--workers", "10"], 10, 10),
+            (16, 3, "warning_sign", [], 3, 2),
+        ]
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            videos = [root / f"{i}F.MP4" for i in range(10)]
+            for video in videos:
+                video.touch()
+            with (patch("analyse.run.shutil.which", return_value="installed"),
+                  patch.object(VideoPreprocessor, "process"),
+                  patch.object(AnalysisRun, "run_detectors", return_value=[])):
+                for cpus, count, detectors, options, preprocessing, detection in cases:
+                    with (self.subTest(cpus=cpus, count=count, detectors=detectors, options=options),
+                          patch("analyse.run.cv2.getNumberOfCPUs", return_value=cpus),
+                          patch("analyse.run.thread_map", wraps=thread_map) as parallel_map):
+                        main([*map(str, videos[:count]), "--detect", detectors, "--output", str(root / "events.csv"),
+                              *options])
+                        self.assertEqual([stage.kwargs["max_workers"] for stage in parallel_map.call_args_list],
+                                         [preprocessing, detection])
+
     def test_run_preprocesses_overlapping_inputs_once_for_both_detectors(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             video = root / "exampleF.MP4"
             video.touch()
-            processed = ProcessedVideo(video, 10., True, [], None)
+            processed = ProcessedVideo(video, 10., True, [])
             with (patch("analyse.run.shutil.which", return_value="installed"),
                   patch.object(VideoPreprocessor, "process", return_value=processed) as preprocess,
                   patch.object(SpeedbreakerDetector, "detect", return_value=([], 10.)) as crossings,
@@ -40,23 +97,45 @@ class PreprocessingTests(unittest.TestCase):
             fresh = VideoPreprocessor(root)
             reuse = VideoPreprocessor(root, reuse_cache=True)
             outputs = [json.dumps(self.metadata), self.telemetry] * 3
-            with (patch("analyse.preprocess.subprocess.check_output", side_effect=outputs) as extract,
-                  patch("analyse.preprocess.CameraMotion.read", return_value=np.ones((5, 4))) as flow):
+            with patch("analyse.preprocess.subprocess.check_output", side_effect=outputs) as extract:
                 fresh.process(video)
                 fresh.process(video)
                 cached = reuse.process(video)
                 self.assertEqual(extract.call_count, 4)
-                self.assertEqual(flow.call_count, 2)
                 self.assertEqual(cached.duration, 10.)
                 self.assertIsInstance(cached.duration, float)
                 self.assertTrue(cached.has_video_stream)
                 self.assertEqual(cached.debug_metadata, self.metadata)
                 self.assertEqual(cached.gps_trace.at(2), 42.5)
                 self.assertEqual(cached.gps_samples[0].longitude_deg, 78.13)
-                np.testing.assert_array_equal(cached.motion, np.ones((5, 4)))
                 video.write_bytes(b"replacement")
                 reuse.process(video)
-                self.assertEqual(flow.call_count, 3)
+                self.assertEqual(extract.call_count, 6)
+
+    def test_detector_owns_motion_and_reuses_it_independently_of_metadata(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "2026_1113_064412_002414F.MP4"
+            video.touch()
+            args = [str(video), "--work-dir", directory, "--output", str(root / "events.csv")]
+            with (patch("analyse.run.shutil.which", return_value="installed"),
+                  patch("analyse.preprocess.subprocess.check_output",
+                        side_effect=[json.dumps(self.metadata), self.telemetry] * 3) as extract,
+                  patch.object(ProcessedVideo, "frames", return_value=iter(())),
+                  patch.object(CameraMotion, "read", return_value=np.zeros((5, 4))) as flow):
+                main([*args, "--detect", "warning_sign"])
+                flow.assert_not_called()
+                self.assertFalse((root / "motion").exists())
+                main([*args, "--preprocess-cache"])
+                main([*args, "--preprocess-cache"])
+                self.assertEqual(extract.call_count, 2)
+                flow.assert_called_once_with(video, hwaccel=None, duration=10.)
+                explicit = [*args, "--motion-cache", str(root / "custom"), "--hwaccel", "d3d11va"]
+                main(explicit)
+                main(explicit)
+                self.assertEqual(extract.call_count, 6)
+                self.assertEqual(flow.call_args_list,
+                                 [call(video, hwaccel=None, duration=10.), call(video, hwaccel="d3d11va", duration=10.)])
 
     def test_probe_handles_missing_duration_and_audio_only_clips(self):
         video = Path("exampleF.MP4")
@@ -72,12 +151,12 @@ class PreprocessingTests(unittest.TestCase):
         self.assertFalse(probe.has_video_stream)
 
     def test_detectors_require_only_their_inputs(self):
-        video = ProcessedVideo(path=Path("exampleF.MP4"), duration=10., has_video_stream=True,
-                               gps_samples=[], motion=None)
-        with self.assertRaisesRegex(ValueError, "exampleF.MP4.*camera-motion"):
-            SpeedbreakerDetector().detect(video)
-        video.motion = np.ones((5, 4))
+        video = ProcessedVideo(path=Path("exampleF.MP4"), duration=10., has_video_stream=True, gps_samples=[])
         with self.assertRaisesRegex(ValueError, "exampleF.MP4.*GPS speed"):
+            SpeedbreakerDetector().detect(video)
+        video.gps_samples.append(GpsSample("", 0., None, None, 10., None))
+        with (patch.object(CameraMotion, "read", return_value=np.empty((0, 4))),
+              self.assertRaisesRegex(ValueError, "exampleF.MP4.*camera-motion")):
             SpeedbreakerDetector().detect(video)
         with patch.object(ProcessedVideo, "frames", return_value=iter(())) as frames:
             self.assertEqual(WarningSignDetector().detect(video), ([], 10.))
