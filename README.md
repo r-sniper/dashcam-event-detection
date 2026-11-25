@@ -6,17 +6,20 @@ Find speedbreaker crossings and triangular warning signs in dashcam footage. Rev
 
 - VIOFO A229 Plus (front camera)
 
+Speedbreaker detection uses the camera's recorded GPS speed and reads the timestamp in each filename as India Standard Time (UTC+05:30).
+
 To request support for another camera, [open a GitHub issue](https://github.com/r-sniper/dashcam-event-detection/issues/new).
 
 ## How to run
 
 ### Prerequisites
 
-Install uv, FFmpeg (includes ffprobe), and ExifTool. On the first run, uv sets up Python 3.12 or newer and the project dependencies.
+Run the commands for your operating system. On the first run, uv sets up Python and the project's dependencies.
 
 **Windows (PowerShell)**
 
 ```powershell
+winget install -e --id Git.Git
 winget install -e --id astral-sh.uv
 winget install -e --id Gyan.FFmpeg
 winget install -e --id OliverBetz.ExifTool
@@ -25,35 +28,54 @@ winget install -e --id OliverBetz.ExifTool
 **macOS** with [Homebrew](https://brew.sh/)
 
 ```sh
-brew install uv ffmpeg exiftool
+brew install git uv ffmpeg exiftool
 ```
 
 **Linux (Ubuntu/Debian)**
 
 ```sh
-sudo apt update && sudo apt install -y curl ffmpeg libimage-exiftool-perl
+sudo apt update && sudo apt install -y git curl ffmpeg libimage-exiftool-perl
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-### Scan your clips
+### Find speedbreakers in your footage
 
-1. Download or clone this repository. Open a new terminal in the folder containing `analyze.py`.
-2. Put your original front-camera clips directly in `videos/sample/`. Keep the filenames ending in `F.MP4`. The speedbreaker detector uses embedded GPS speed and reads filename timestamps as India Standard Time (UTC+05:30).
-3. Run the default speedbreaker scan.
+1. Open a new terminal and download the project.
+
+   ```sh
+   git clone https://github.com/r-sniper/dashcam-event-detection.git
+   ```
+
+2. Enter the project folder. Run the remaining commands here.
+
+   ```sh
+   cd dashcam-event-detection
+   ```
+
+3. Create a folder for your footage.
+
+   ```sh
+   mkdir videos
+   mkdir videos/sample
+   ```
+
+4. Copy your front-camera files ending in `F.MP4` directly into `videos/sample/`. Keep their original names.
+
+5. Find speedbreaker crossings.
 
    ```sh
    uv run analyze.py videos/sample
    ```
 
-Results appear in `analysis/speedbreaker/`.
+6. Open `analysis/speedbreaker/` inside the project to see your results.
 
-- `detections.csv` has one row per event. Open the clip named in `filename` and seek to `peak_s` seconds from its start.
-- `detections.clips.csv` lists each scanned clip, the seconds inspected, and the event count, including zero.
-- `detections.speedbreakers.mp4` plays the crossings in sequence when the scan finds any.
+   - Play `detections.speedbreakers.mp4` to watch the crossings in sequence. This video appears when the tool finds a crossing.
+   - Open `detections.csv` to find a crossing in the original footage. Play the clip named in `filename` and jump to `peak_s` seconds from its start.
+   - Open `detections.clips.csv` to see how many crossings each clip had, including zero.
 
 ## Additional options
 
-The default detector is `speedbreaker`. To also look for triangular warning signs, select both detectors.
+To find both speedbreakers and triangular warning signs, run this command from the project folder.
 
 ```sh
 uv run analyze.py videos/sample --detect speedbreaker,warning_sign
