@@ -1,14 +1,18 @@
 import json
 import unittest
+from argparse import Namespace
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 from unittest.mock import call, patch
 
 import numpy as np
 from tqdm.contrib.concurrent import thread_map
 
 from .preprocess import FFprobeResult, GpsSample, ProcessedVideo, VideoPreprocessor
-from .run import AnalysisRun, main
+from .run import AnalysisRun, main, preprocess_videos
 from .signals import CameraMotion
 from .speedbreaker import SpeedbreakerDetector
 from .warning_sign import WarningSignDetector
@@ -18,6 +22,30 @@ class PreprocessingTests(unittest.TestCase):
     metadata = {"format": {"duration": "10"}, "streams": [{"codec_type": "video", "width": 2560}]}
     telemetry = ("gps_timestamp_utc,latitude_deg,longitude_deg,speed_kmh,heading_deg\n"
                  "2026:11:13 01:14:14Z,17.61,78.13,42.5,356.6\n")
+
+    def test_preprocessing_displays_completions_while_first_clip_is_busy(self):
+        videos = [Path(f"{i}F.MP4") for i in range(5)]
+        hits_displayed = Event()
+
+        class ProgressOutput(StringIO):
+            def write(self, text: str) -> int:
+                written = super().write(text)
+                if "4/5" in text:
+                    hits_displayed.set()
+                return written
+
+        def process(video: Path) -> ProcessedVideo:
+            if video == videos[0]:
+                self.assertTrue(hits_displayed.wait(5), "Four completions should be visible before clip 0 finishes")
+            return ProcessedVideo(video, 10., True, [])
+
+        output = ProgressOutput()
+        args = Namespace(work_dir=Path("."), preprocess_cache=True, workers=2)
+        with redirect_stdout(output), patch.object(VideoPreprocessor, "process", side_effect=process):
+            results = preprocess_videos(videos, args)
+        for completed in range(1, len(videos) + 1):
+            self.assertIn(f"{completed}/5", output.getvalue())
+        self.assertEqual([result.path for result in results], videos)
 
     def test_cli_sizes_each_pool_for_its_workload(self):
         cases = [

@@ -219,7 +219,8 @@ def preprocess_videos(videos: Sequence[Path], args: argparse.Namespace) -> list[
     default_workers = min(8, cv2.getNumberOfCPUs())
     workers = min(len(videos), args.workers or default_workers)
     logger.info("Preprocessing (workers=%d)", workers)
-    return thread_map(preprocessor.process, videos, max_workers=workers,
+    # Show cache hits even if they all finish within one redraw interval.
+    return thread_map(preprocessor.process, videos, max_workers=workers, miniters=1, mininterval=0,
                       desc="Preprocessing", unit="video", file=sys.stdout)
 
 
