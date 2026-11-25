@@ -11,7 +11,7 @@ from scipy.signal import find_peaks
 
 from .common import Detection, DetectorName
 from .preprocess import ProcessedVideo
-from .signals import CameraMotion, GpsTrace, ScanWindows
+from .signals import CameraMotion, GpsTrace, MotionCache, ScanWindows
 
 
 PRE_ROLL_S = 2.0
@@ -36,8 +36,10 @@ class SpeedbreakerDetector:
     separation_s = 5
     bounce_samples = 13
 
-    def __init__(self, scan_mode: str = "full"):
+    def __init__(self, scan_mode: str = "full", *, motion_cache: MotionCache | None = None, hwaccel: str | None = None):
         self.scan_mode = scan_mode
+        self.read_motion = motion_cache.read if motion_cache else CameraMotion.read
+        self.hwaccel = hwaccel
 
     @classmethod
     def measure(cls, motion: NDArray[np.float64], gps: GpsTrace) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
@@ -109,12 +111,12 @@ class SpeedbreakerDetector:
         return sorted(kept, key=lambda event: event.peak_s)
 
     def detect(self, video: ProcessedVideo) -> tuple[list[SpeedbreakerDetection], float]:
-        motion = video.motion
-        if motion is None or len(motion) < 3:
-            raise ValueError(f"{video.path.name}: speedbreaker requires at least three camera-motion samples")
         gps = video.gps_trace
         if not np.any((gps.seconds >= 0) & (gps.seconds <= video.duration)):
             raise ValueError(f"{video.path.name}: speedbreaker requires GPS speed samples aligned to the clip")
+        motion = self.read_motion(video.path, hwaccel=self.hwaccel)
+        if len(motion) < 3:
+            raise ValueError(f"{video.path.name}: speedbreaker requires at least three camera-motion samples")
         if self.scan_mode == "full":
             return self.score_windows([motion], gps, video.duration), video.duration
         windows = ScanWindows.guided(gps, video.duration)

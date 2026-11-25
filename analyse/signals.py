@@ -120,9 +120,9 @@ class ScanWindows:
 class MotionCache:
     """Reuse expensive full-clip optical flow when scoring or annotations change."""
 
-    def __init__(self, folder: str | Path):
+    def __init__(self, folder: str | Path, *, reuse: bool = True):
         self.folder = Path(folder)
-        self.folder.mkdir(parents=True, exist_ok=True)
+        self.reuse = reuse
 
     def path(self, video: Path) -> Path:
         stat = video.stat()
@@ -132,13 +132,14 @@ class MotionCache:
 
     def store(self, video: Path, motion: NDArray[np.float64]):
         target = self.path(video)
+        self.folder.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=self.folder, suffix=".tmp", delete=False) as f:
             np.savez_compressed(f, motion=motion)
         os.replace(f.name, target)
 
     def read(self, video: Path, hwaccel: str | None = None) -> NDArray[np.float64]:
         target = self.path(video)
-        if target.exists():
+        if self.reuse and target.exists():
             with np.load(target) as data:
                 return data["motion"]
         motion = CameraMotion.read(video, hwaccel=hwaccel)

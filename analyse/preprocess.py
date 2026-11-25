@@ -17,7 +17,7 @@ from numpy.typing import NDArray
 
 from telemetry_time import IST, parse_timestamp
 
-from .signals import CameraMotion, GpsTrace, MotionCache
+from .signals import GpsTrace
 
 
 DEFAULT_WORK_DIR = Path(".speedbreaker-work")
@@ -90,7 +90,6 @@ class ProcessedVideo:
     duration: float  # Seconds.
     has_video_stream: bool
     gps_samples: list[GpsSample]
-    motion: NDArray[np.float64] | None
     debug_metadata: dict[str, object] | None = None
 
     @property
@@ -125,8 +124,7 @@ class ProcessedVideo:
         temp = Path(output.name)
         try:
             with output:
-                arrays = {"motion": self.motion} if self.motion is not None else {}
-                np.savez_compressed(output, header=header, **arrays)
+                np.savez_compressed(output, header=header)
             temp.replace(target)
         finally:
             temp.unlink(missing_ok=True)
@@ -137,25 +135,20 @@ class ProcessedVideo:
             header = json.loads(data["header"].item())
             return cls(path=Path(header["path"]), duration=header["duration"],
                        has_video_stream=header["has_video_stream"], debug_metadata=header["debug_metadata"],
-                       gps_samples=[GpsSample(**row) for row in header["gps_samples"]],
-                       motion=data["motion"] if "motion" in data else None)
+                       gps_samples=[GpsSample(**row) for row in header["gps_samples"]])
 
 
 class VideoPreprocessor:
-    version = 2
+    version = 3
 
-    def __init__(self, work_dir: Path = DEFAULT_WORK_DIR, reuse_cache: bool = False,
-                 *, include_motion: bool = True, motion_cache: MotionCache | None = None, hwaccel: str | None = None):
+    def __init__(self, work_dir: Path = DEFAULT_WORK_DIR, reuse_cache: bool = False):
         self.folder = work_dir / "preprocessed"
         self.reuse_cache = reuse_cache
-        self.include_motion = include_motion
-        self.motion_cache = motion_cache
-        self.hwaccel = hwaccel
 
     def process(self, video: Path) -> ProcessedVideo:
         video = video.resolve()
         stat = video.stat()
-        identity = (self.version, str(video), stat.st_size, stat.st_mtime_ns, self.include_motion, self.hwaccel)
+        identity = (self.version, str(video), stat.st_size, stat.st_mtime_ns)
         key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:16]
         target = self.folder / f"{video.stem}.{key}.npz"
         if self.reuse_cache and target.is_file():
@@ -166,12 +159,8 @@ class VideoPreprocessor:
         telemetry = subprocess.check_output(["exiftool", "-ee3", "-n", "-f", "-p", str(template), str(video)],
                                            encoding="utf-8")
         samples = GpsSample.from_csv(telemetry, video)
-        motion = None
-        if self.include_motion:
-            reader = self.motion_cache.read if self.motion_cache else CameraMotion.read
-            motion = reader(video, hwaccel=self.hwaccel)
         processed = ProcessedVideo(path=video, duration=probe.duration, has_video_stream=probe.has_video_stream,
-                                   gps_samples=samples, motion=motion, debug_metadata=probe.raw)
+                                   gps_samples=samples, debug_metadata=probe.raw)
         self.folder.mkdir(parents=True, exist_ok=True)
         processed.save(target)
         return processed

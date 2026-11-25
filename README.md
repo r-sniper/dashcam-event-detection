@@ -83,6 +83,8 @@ uv run analyze.py videos/sample --detect speedbreaker,warning_sign
 
 Add `--review review.html` for a clickable event list. Run `uv run analyze.py --help` for all options.
 
+Preprocessing reads clip metadata and GPS with up to eight parallel workers, limited by the available logical CPUs and clips. Detection defaults to two clips at once. The speedbreaker detector measures camera motion during this stage. Add `--workers 10` to allow up to ten clips at once in each stage.
+
 ## Contributing
 
 Submit every change through a pull request. Describe what changed and how you tested it. Every pull request requires approval from [Rahul Shah (@r-sniper)](https://github.com/r-sniper) before it can be merged.

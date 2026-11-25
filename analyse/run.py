@@ -64,7 +64,8 @@ class AnalysisRun:
     )]
     clip_fields = ["filename", "file_path", "detector", "scan_mode", "duration_s", "inspected_s", "events"]
 
-    def __init__(self, names: Sequence[DetectorName], scan_mode: str = "full", sign_lookback: float | None = None):
+    def __init__(self, names: Sequence[DetectorName], scan_mode: str = "full", sign_lookback: float | None = None,
+                 *, motion_cache: MotionCache | None = None, hwaccel: str | None = None):
         self.scan_mode = scan_mode
         self.sign_lookback = sign_lookback
         if sign_lookback is not None:
@@ -73,7 +74,7 @@ class AnalysisRun:
         for name in names:
             detector_type = self.detectors[name]
             if issubclass(detector_type, SpeedbreakerDetector):
-                self.selected.append(detector_type(scan_mode))
+                self.selected.append(detector_type(scan_mode, motion_cache=motion_cache, hwaccel=hwaccel))
             else:
                 self.selected.append(detector_type())
 
@@ -174,11 +175,12 @@ def build_parser() -> argparse.ArgumentParser:
     # Accept the explicit full mode used by earlier CLI commands.
     p.add_argument("--scan-mode", choices=("full",), help=argparse.SUPPRESS)
     p.add_argument("--output", type=Path, default=Path("analysis/speedbreaker/detections.csv"))
-    p.add_argument("--workers", type=int, default=2, help="Number of clips to process in parallel")
+    p.add_argument("--workers", type=int,
+                   help="Maximum parallel clips in each stage (default: automatic for preprocessing, 2 for detection)")
     p.add_argument("--work-dir", type=Path, default=DEFAULT_WORK_DIR,
                    help="Store preprocessed clips here (default: %(default)s)")
     p.add_argument("--preprocess-cache", action="store_true",
-                   help="Reuse matching preprocessed clips. By default, extract and save them again.")
+                   help="Reuse saved metadata and default speedbreaker motion measurements. By default, refresh them.")
     p.add_argument("--motion-cache", type=Path, help="Reuse full-video motion measurements in this folder")
     p.add_argument("--hwaccel", choices=["d3d11va"], help="Use Windows GPU decoding for 8-bit motion analysis")
     p.add_argument("--sign-lookback", type=float, help="Search for signs this many seconds before each detected crossing")
@@ -199,7 +201,7 @@ def build_args(parser: argparse.ArgumentParser, argv: Sequence[str] | None) -> a
             parser.error("--sign-lookback requires a positive duration and both speedbreaker and warning_sign")
     if args.output.suffix.lower() != ".csv":
         parser.error("--output needs a .csv filename")
-    if args.workers < 1:
+    if args.workers is not None and args.workers < 1:
         parser.error("--workers must be positive")
     return args
 
@@ -216,14 +218,14 @@ def check_prerequisites(inputs: Sequence[Path], parser: argparse.ArgumentParser)
     return videos
 
 
-def preprocess_videos(videos: Sequence[Path], args: argparse.Namespace,
-                      pool: ThreadPoolExecutor) -> list[ProcessedVideo]:
-    cache = MotionCache(args.motion_cache) if args.motion_cache else None
-    preprocessor = VideoPreprocessor(args.work_dir, args.preprocess_cache,
-                                     include_motion=DetectorName.SPEEDBREAKER in args.detect,
-                                     motion_cache=cache, hwaccel=args.hwaccel)
-    futures = [pool.submit(preprocessor.process, video) for video in videos]
-    with tqdm(total=len(videos), desc="Preprocessing", unit="video", file=sys.stdout) as progress:
+def preprocess_videos(videos: Sequence[Path], args: argparse.Namespace) -> list[ProcessedVideo]:
+    preprocessor = VideoPreprocessor(args.work_dir, args.preprocess_cache)
+    default_workers = min(8, cv2.getNumberOfCPUs())
+    workers = min(len(videos), args.workers or default_workers)
+    logger.info("Preprocessing (workers=%d)", workers)
+    with (ThreadPoolExecutor(max_workers=workers) as pool,
+          tqdm(total=len(videos), desc="Preprocessing", unit="video", file=sys.stdout) as progress):
+        futures = [pool.submit(preprocessor.process, video) for video in videos]
         for future in as_completed(futures):
             future.result()
             progress.update(1)
@@ -242,11 +244,13 @@ def main(argv: Sequence[str] | None = None):
     logger.info("Found %d %s", len(videos), "video" if len(videos) == 1 else "videos")
 
     cv2.setNumThreads(1)
-    run = AnalysisRun(args.detect, sign_lookback=args.sign_lookback)
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        logger.info("Starting preprocessing")
-        processed = preprocess_videos(videos, args, pool)
-        logger.info("Running detectors")
+    processed = preprocess_videos(videos, args)
+    motion_folder = args.motion_cache or args.work_dir / "motion" / (args.hwaccel or "cpu")
+    motion_cache = MotionCache(motion_folder, reuse=args.motion_cache is not None or args.preprocess_cache)
+    run = AnalysisRun(args.detect, sign_lookback=args.sign_lookback, motion_cache=motion_cache, hwaccel=args.hwaccel)
+    workers = min(len(processed), args.workers or 2)
+    logger.info("Running detectors (workers=%d)", workers)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         results = run.scan_videos(processed, pool)
 
     events, clips = run.collect_results(results)
