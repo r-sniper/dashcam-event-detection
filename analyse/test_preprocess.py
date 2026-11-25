@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import call, patch
 
 import numpy as np
+from tqdm.contrib.concurrent import thread_map
 
 from .preprocess import FFprobeResult, GpsSample, ProcessedVideo, VideoPreprocessor
 from .run import AnalysisRun, main
@@ -40,11 +41,12 @@ class PreprocessingTests(unittest.TestCase):
                 for cpus, count, detectors, options, preprocessing, detection in cases:
                     with (self.subTest(cpus=cpus, count=count, detectors=detectors, options=options),
                           patch("analyse.run.cv2.getNumberOfCPUs", return_value=cpus),
-                          patch("analyse.run.ThreadPoolExecutor", wraps=ThreadPoolExecutor) as pools):
+                          patch("analyse.run.thread_map", wraps=thread_map) as preprocess_map,
+                          patch("analyse.run.ThreadPoolExecutor", wraps=ThreadPoolExecutor) as detector_pool):
                         main([*map(str, videos[:count]), "--detect", detectors, "--output", str(root / "events.csv"),
                               *options])
-                        self.assertEqual(pools.call_args_list,
-                                         [call(max_workers=preprocessing), call(max_workers=detection)])
+                        self.assertEqual(preprocess_map.call_args.kwargs["max_workers"], preprocessing)
+                        detector_pool.assert_called_once_with(max_workers=detection)
 
     def test_run_preprocesses_overlapping_inputs_once_for_both_detectors(self):
         with TemporaryDirectory() as directory:

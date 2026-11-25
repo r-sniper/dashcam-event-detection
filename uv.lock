@@ -34,7 +34,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.24,<3" },
     { name = "opencv-python-headless", specifier = ">=4.8,<5" },
     { name = "scipy", specifier = ">=1.10,<2" },
-    { name = "tqdm", specifier = ">=4.66,<5" },
+    { name = "tqdm", specifier = ">=4.70.1,<5" },
 ]
 
 [package.metadata.requires-dev]
