@@ -1,27 +1,65 @@
 # Dashcam event detection
 
-Detect speedbreaker crossings from camera motion and GPS speed, and look for triangular warning signs in the front-camera footage. The current input format is VIOFO front-camera MP4s with filenames ending in `F.MP4`.
+Find speedbreaker crossings and triangular warning signs in dashcam footage. Review crossings in a highlight video or jump to individual events in the original clips.
 
-## Run a scan
+## Tested cameras
 
-Install `uv` and put FFmpeg, FFprobe and ExifTool on your PATH. Pass a folder of clips or individual files. This command scans for crossings, looks for signs on each approach, and writes an offline review page.
+- VIOFO A229 Plus (front camera)
+
+To request support for another camera, [open a GitHub issue](https://github.com/r-sniper/dashcam-event-detection/issues/new).
+
+## How to run
+
+### Prerequisites
+
+Install uv, FFmpeg (includes ffprobe), and ExifTool. On the first run, uv sets up Python 3.12 or newer and the project dependencies.
+
+**Windows (PowerShell)**
 
 ```powershell
-uv sync --locked
-uv run --locked analyze.py videos/complete --detect speedbreaker,warning_sign --sign-lookback 15 --output analysis/events.csv --review visualize/events.html
+winget install -e --id astral-sh.uv
+winget install -e --id Gyan.FFmpeg
+winget install -e --id OliverBetz.ExifTool
 ```
 
-Open `visualize/events.html` to jump to detections in the original footage. The event CSV includes the filename, clip-relative timestamp and score. The companion `events.clips.csv` lists coverage for each clip.
+**macOS** with [Homebrew](https://brew.sh/)
 
-Each speedbreaker row also reports `start_s` and `end_s` in seconds from the start of its source clip. The interval covers the motion samples behind consecutive above-threshold scores around `peak_s`, bounded by the scan window and the midpoints to neighboring peaks.
+```sh
+brew install uv ffmpeg exiftool
+```
 
-The compilation uses `buffered_start_s` and `buffered_end_s` from the CSV to show the approach and departure for each crossing. By default it includes 5 seconds before `start_s` and 2 seconds after `end_s`, up to the source clip boundaries. Adjust `PRE_ROLL_S` and `POST_ROLL_S` in `analyse/speedbreaker.py` and rerun the scan to change those durations.
+**Linux (Ubuntu/Debian)**
 
-After saving the CSV, the scan joins the buffered intervals in CSV order into `events.speedbreakers.mp4` beside it. It re-encodes each cut with the source video codec, resolution and frame timing so crossings can start between keyframes. Clips in one compilation must share a video codec, resolution and pixel format. The first clip with audio supplies the output audio codec, sample rate and channel layout. Muted clips receive silence only when the compilation includes audio. A run with zero crossings clears any previous compilation for that output name.
+```sh
+sudo apt update && sudo apt install -y curl ffmpeg libimage-exiftool-perl
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
-Each run prepares a `ProcessedVideo` directly from each MP4 before detection. It contains container and stream metadata, timestamped GPS coordinates, speed and heading. Speedbreaker runs also measure camera motion at 10 Hz. The speedbreaker detector requires motion samples and at least one GPS speed aligned to the clip. A GPS gap can leave an individual crossing's speed empty. Warning-sign detection only needs the video frames and duration.
+### Scan your clips
 
-Preprocessing writes one archive per clip and extraction configuration under `.speedbreaker-work/preprocessed/`. By default each run refreshes the archive. Add `--preprocess-cache` to reuse it when the source path, size, modification time, preprocessing version and extraction settings match. Use `--work-dir PATH` to choose another working directory. The existing `--motion-cache PATH` flag can still reuse optical flow independently.
+1. Download or clone this repository. Open a new terminal in the folder containing `analyze.py`.
+2. Put your original front-camera clips directly in `videos/sample/`. Keep the filenames ending in `F.MP4`. The speedbreaker detector uses embedded GPS speed and reads filename timestamps as India Standard Time (UTC+05:30).
+3. Run the default speedbreaker scan.
+
+   ```sh
+   uv run analyze.py videos/sample
+   ```
+
+Results appear in `analysis/speedbreaker/`.
+
+- `detections.csv` has one row per event. Open the clip named in `filename` and seek to `peak_s` seconds from its start.
+- `detections.clips.csv` lists each scanned clip, the seconds inspected, and the event count, including zero.
+- `detections.speedbreakers.mp4` plays the crossings in sequence when the scan finds any.
+
+## Additional options
+
+The default detector is `speedbreaker`. To also look for triangular warning signs, select both detectors.
+
+```sh
+uv run analyze.py videos/sample --detect speedbreaker,warning_sign
+```
+
+Add `--review review.html` for a clickable event list. Run `uv run analyze.py --help` for all options.
 
 ## Contributing
 
