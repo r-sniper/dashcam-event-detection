@@ -101,12 +101,13 @@ class PreprocessingTests(unittest.TestCase):
                 main([*args, "--preprocess-cache"])
                 main([*args, "--preprocess-cache"])
                 self.assertEqual(extract.call_count, 2)
-                flow.assert_called_once_with(video, hwaccel=None)
+                flow.assert_called_once_with(video, hwaccel=None, duration=10.)
                 explicit = [*args, "--motion-cache", str(root / "custom"), "--hwaccel", "d3d11va"]
                 main(explicit)
                 main(explicit)
                 self.assertEqual(extract.call_count, 6)
-                self.assertEqual(flow.call_args_list, [call(video, hwaccel=None), call(video, hwaccel="d3d11va")])
+                self.assertEqual(flow.call_args_list,
+                                 [call(video, hwaccel=None, duration=10.), call(video, hwaccel="d3d11va", duration=10.)])
 
     def test_probe_handles_missing_duration_and_audio_only_clips(self):
         video = Path("exampleF.MP4")

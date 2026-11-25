@@ -114,7 +114,7 @@ class SpeedbreakerDetector:
         gps = video.gps_trace
         if not np.any((gps.seconds >= 0) & (gps.seconds <= video.duration)):
             raise ValueError(f"{video.path.name}: speedbreaker requires GPS speed samples aligned to the clip")
-        motion = self.read_motion(video.path, hwaccel=self.hwaccel)
+        motion = self.read_motion(video.path, hwaccel=self.hwaccel, duration=video.duration)
         if len(motion) < 3:
             raise ValueError(f"{video.path.name}: speedbreaker requires at least three camera-motion samples")
         if self.scan_mode == "full":
