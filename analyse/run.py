@@ -223,12 +223,11 @@ def preprocess_videos(videos: Sequence[Path], args: argparse.Namespace) -> list[
     default_workers = min(8, cv2.getNumberOfCPUs())
     workers = min(len(videos), args.workers or default_workers)
     logger.info("Preprocessing (workers=%d)", workers)
-    with (ThreadPoolExecutor(max_workers=workers) as pool,
-          tqdm(total=len(videos), desc="Preprocessing", unit="video", file=sys.stdout) as progress):
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(preprocessor.process, video) for video in videos]
-        for future in as_completed(futures):
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Preprocessing",
+                           unit="video", file=sys.stdout):
             future.result()
-            progress.update(1)
     # Keep detection and CSV output in input order.
     return [future.result() for future in futures]
 
