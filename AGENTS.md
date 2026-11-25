@@ -11,3 +11,7 @@
 ## Git
 
 - Use the local `git` CLI for regular Git operations, including creating branches, committing, pulling, and pushing. Do not use the GitHub API for these operations.
+
+## Linear tasks
+
+When asked to take a Linear issue, follow the [linear-task workflow](.agents/skills/linear-task/SKILL.md). Use `/linear-task ENG-42` in Claude Code or Copilot CLI, or `$linear-task ENG-42` in Codex CLI. A Linear issue URL works in place of the key.
