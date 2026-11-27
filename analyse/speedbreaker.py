@@ -34,7 +34,28 @@ class SpeedbreakerDetector:
     # Lowest threshold tied for best event-level F2 on the 13 November guide clips.
     threshold = 1.95
     separation_s = 5
+    min_motion_samples = 3
     bounce_samples = 13
+    vertical_clip_px = 20
+    pitch_smoothing_sigma_samples = 0.8
+    pitch_baseline_samples = 21
+    quality_median_samples = 5
+    full_weight_inlier_fraction = 0.50
+
+    approach_offsets_s = (-8, -6, -4, -2)
+    trough_offsets_s = range(7)
+    trough_median_samples = 3
+    crossing_offset_s = 2
+    slow_speed_cutoff_kmh = 35
+    slow_speed_range_kmh = 26
+    full_brake_drop_kmh = 30
+    full_crossing_brake_drop_kmh = 24
+
+    slow_weight = 0.50
+    brake_weight = 0.35
+    crossing_brake_weight = 0.50
+    missing_gps_prior = 0.40
+    missing_crossing_brake_prior = 0.20
 
     def __init__(self, scan_mode: str = "full", *, motion_cache: MotionCache | None = None, hwaccel: str | None = None):
         self.scan_mode = scan_mode
@@ -44,23 +65,28 @@ class SpeedbreakerDetector:
     @classmethod
     def measure(cls, motion: NDArray[np.float64], gps: GpsTrace) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         t, vertical, _, quality = motion.T
-        smoothed = gaussian_filter1d(np.clip(vertical, -20, 20), .8)
-        pitch = smoothed - median_filter(vertical, 21, mode="nearest")
+        clipped = np.clip(vertical, -cls.vertical_clip_px, cls.vertical_clip_px)
+        smoothed = gaussian_filter1d(clipped, cls.pitch_smoothing_sigma_samples)
+        pitch = smoothed - median_filter(vertical, cls.pitch_baseline_samples, mode="nearest")
         up = np.maximum(0, maximum_filter1d(pitch, cls.bounce_samples))
         down = np.maximum(0, -minimum_filter1d(pitch, cls.bounce_samples))
         bounce = np.sqrt(up * down)
         # Weak RANSAC consensus often means the camera was following a moving object.
-        bounce *= np.clip(median_filter(quality, 5) / .50, 0, 1)
-        before = reduce(np.fmax, (gps.at(t + offset) for offset in (-8, -6, -4, -2)))
+        inlier_fraction = median_filter(quality, cls.quality_median_samples)
+        bounce *= np.clip(inlier_fraction / cls.full_weight_inlier_fraction, 0, 1)
+        before = reduce(np.fmax, (gps.at(t + offset) for offset in cls.approach_offsets_s))
         # A single spurious zero between motorway-speed fixes is common in these exports.
-        speeds = np.stack([gps.at(t + offset) for offset in range(7)])
-        trough = reduce(np.fmin, (np.median(speeds[i:i + 3], axis=0) for i in range(5)))
-        slow = np.clip((35 - trough) / 26, 0, 1)
-        brake = np.clip((before - trough) / 30, 0, 1)
+        speeds = np.stack([gps.at(t + offset) for offset in cls.trough_offsets_s])
+        width = cls.trough_median_samples
+        trough = reduce(np.fmin, (np.median(speeds[i:i + width], axis=0) for i in range(len(speeds) - width + 1)))
+        slow = np.clip((cls.slow_speed_cutoff_kmh - trough) / cls.slow_speed_range_kmh, 0, 1)
+        brake = np.clip((before - trough) / cls.full_brake_drop_kmh, 0, 1)
         # A missing fix supplies no observed braking. Give motion-only events a neutral prior.
-        crossing_brake = np.clip((gps.at(t - 2) - gps.at(t + 2)) / 24, 0, 1)
-        prior = (.50 * np.nan_to_num(slow, nan=.40) + .35 * np.nan_to_num(brake, nan=.40)
-                 + .50 * np.nan_to_num(crossing_brake, nan=.20))
+        crossing_drop = gps.at(t - cls.crossing_offset_s) - gps.at(t + cls.crossing_offset_s)
+        crossing_brake = np.clip(crossing_drop / cls.full_crossing_brake_drop_kmh, 0, 1)
+        prior = (cls.slow_weight * np.nan_to_num(slow, nan=cls.missing_gps_prior)
+                 + cls.brake_weight * np.nan_to_num(brake, nan=cls.missing_gps_prior)
+                 + cls.crossing_brake_weight * np.nan_to_num(crossing_brake, nan=cls.missing_crossing_brake_prior))
         return bounce, np.log1p(bounce) + prior
 
     @classmethod
@@ -82,7 +108,7 @@ class SpeedbreakerDetector:
                       duration: float) -> list[SpeedbreakerDetection]:
         candidates = []
         for motion in chunks:
-            if len(motion) < 3:
+            if len(motion) < self.min_motion_samples:
                 continue
             bounce, score = self.measure(motion, gps)
             # Padding retains peaks at the beginning and end of a recording.
@@ -115,8 +141,8 @@ class SpeedbreakerDetector:
         if not np.any((gps.seconds >= 0) & (gps.seconds <= video.duration)):
             raise ValueError(f"{video.path.name}: speedbreaker requires GPS speed samples aligned to the clip")
         motion = self.read_motion(video.path, hwaccel=self.hwaccel, duration=video.duration)
-        if len(motion) < 3:
-            raise ValueError(f"{video.path.name}: speedbreaker requires at least three camera-motion samples")
+        if len(motion) < self.min_motion_samples:
+            raise ValueError(f"{video.path.name}: speedbreaker requires at least {self.min_motion_samples} camera-motion samples")
         if self.scan_mode == "full":
             return self.score_windows([motion], gps, video.duration), video.duration
         windows = ScanWindows.guided(gps, video.duration)
