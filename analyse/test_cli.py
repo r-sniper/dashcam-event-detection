@@ -1,3 +1,4 @@
+import csv
 import io
 import unittest
 from contextlib import redirect_stderr
@@ -5,11 +6,38 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import numpy as np
+
 from .common import FrontClips
+from .preprocess import GpsSample, ProcessedVideo
 from .run import main
+from .signals import CameraMotion
 
 
 class ScanCliTests(unittest.TestCase):
+    def test_detection_continues_after_a_clip_with_missing_gps(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            missing = ProcessedVideo(root / "missingF.MP4", 10., True, [])
+            good = ProcessedVideo(root / "goodF.MP4", 10., True, [GpsSample("", 0., None, None, 20., None)])
+            missing.path.touch()
+            good.path.touch()
+            output = root / "events.csv"
+            with (patch("analyse.run.shutil.which", return_value="installed"),
+                  patch("analyse.run.preprocess_videos", return_value=[missing, good]),
+                  patch.object(CameraMotion, "read", return_value=np.zeros((5, 4))),
+                  self.assertLogs("analyse.run", level="INFO") as logs):
+                main([str(missing.path), str(good.path), "--work-dir", directory, "--output", str(output)])
+
+            with output.with_suffix(".clips.csv").open(newline="") as table:
+                self.assertEqual([(r["filename"], r["events"]) for r in csv.DictReader(table)], [(good.path.name, "0")])
+            warnings = [r.getMessage() for r in logs.records if r.levelname == "WARNING"]
+            self.assertEqual(len(warnings), 1)
+            self.assertIn(missing.path.name, warnings[0])
+            self.assertIn("GPS speed", warnings[0])
+            self.assertIn("1 succeeded, 1 failed", logs.output[-2])
+            self.assertIn("https://github.com/r-sniper/dashcam-event-detection/issues/new", logs.output[-1])
+
     def test_invalid_arguments_fail_before_clip_discovery(self):
         cases = [
             (["--detect", "missing"], "Unknown detector(s): missing"),

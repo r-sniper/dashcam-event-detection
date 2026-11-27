@@ -103,9 +103,17 @@ class AnalysisRun:
             results.append(self.record(video.path, detector.name, mode, video.duration, inspected, events))
         return results
 
+    def _scan_video(self, video: ProcessedVideo) -> list[ScanResult] | None:
+        try:
+            return self.run_detectors(video)
+        except Exception as err:
+            logger.warning("Skipping %s after detection failed (%s)", video.path, err)
+            return None
+
     def scan_videos(self, videos: Sequence[ProcessedVideo], workers: int) -> list[list[ScanResult]]:
-        return thread_map(self.run_detectors, videos, max_workers=workers,
-                          desc="Detection", unit="video", file=sys.stdout)
+        results = thread_map(self._scan_video, videos, max_workers=workers,
+                             desc="Detection", unit="video", file=sys.stdout)
+        return [result for result in results if result is not None]
 
     @staticmethod
     def assign_ids(events: Sequence[EventRow], clips: Sequence[ClipRow]):
@@ -251,4 +259,7 @@ def main(argv: Sequence[str] | None = None):
         from visualize.review import ReviewPage
         logger.info("Writing review page to %s", args.review)
         ReviewPage.write(args.review, events, clips)
-    logger.info("Scan complete. Saved %d detections to %s", len(events), args.output)
+    logger.info("Video scan complete (%d succeeded, %d failed). Saved %d detections to %s",
+                len(results), len(processed) - len(results), len(events), args.output)
+    logger.info("If something looks wrong, include the relevant log messages in a GitHub issue at "
+                "https://github.com/r-sniper/dashcam-event-detection/issues/new")
