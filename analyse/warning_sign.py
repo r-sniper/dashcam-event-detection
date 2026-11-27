@@ -9,6 +9,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .common import Detection, DetectorName
+from .detector import Detector, DetectorOptions, PriorDetections
 from .preprocess import ProcessedVideo
 
 
@@ -26,10 +27,16 @@ class SignTrack:
     best: WarningSignDetection
 
 
-class WarningSignDetector:
+class WarningSignDetector(Detector[WarningSignDetection]):
     name = DetectorName.WARNING_SIGN
     result_type = WarningSignDetection
     width, height, fps = 960, 540, 2
+
+    def __init__(self, options: DetectorOptions = DetectorOptions()):
+        super().__init__(options)
+        if options.sign_lookback is not None:
+            self.dependencies = (DetectorName.SPEEDBREAKER,)
+            self.scan_mode = f"approach-{options.sign_lookback:g}s"
 
     @staticmethod
     def classify_face(face: NDArray[np.uint8]) -> tuple[str, float]:
@@ -130,11 +137,11 @@ class WarningSignDetector:
                     tracks.append(SignTrack(frame.timestamp_s, 1, x, y, event))
         return [tr.best for tr in tracks if tr.count >= 2]
 
-    def detect(self, video: ProcessedVideo,
-               windows: list[tuple[float, float]] | None = None) -> tuple[list[WarningSignDetection], float]:
+    def _detect(self, video: ProcessedVideo, previous: PriorDetections) -> tuple[list[WarningSignDetection], float]:
         if not video.has_video_stream:
             raise ValueError(f"{video.path.name}: warning_sign requires a video stream")
-        if windows is None:
-            windows = [(0., video.duration)]
+        windows = [(0., video.duration)]
+        if self.options.sign_lookback is not None:
+            windows = self.approaches(previous[DetectorName.SPEEDBREAKER], video.duration, self.options.sign_lookback)
         events = [e for start, end in windows for e in self.scan_window(video, start, end)]
         return events, sum(end-start for start, end in windows)

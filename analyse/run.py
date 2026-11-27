@@ -6,16 +6,16 @@ import shutil
 import sys
 import tempfile
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import asdict, fields
-from datetime import datetime
+from dataclasses import fields
+from graphlib import TopologicalSorter
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import Any, TypedDict
 
 import cv2
 from tqdm.contrib.concurrent import thread_map
 
-from .common import Detection, DetectorName, FrontClips
-from .compilation import SpeedbreakerCompilation
+from .common import Detection, DetectorName, EventRow, FrontClips
+from .detector import Detector, DetectorOptions
 from .preprocess import DEFAULT_WORK_DIR, ProcessedVideo, VideoPreprocessor
 from .signals import MotionCache
 from .speedbreaker import SpeedbreakerDetector
@@ -25,82 +25,44 @@ from .warning_sign import WarningSignDetector
 logger = logging.getLogger(__name__)
 
 
-class EncounterField(TypedDict, total=False):
-    encounter_id: int
-
-
-class EventRow(EncounterField):
-    """Common fields of a recorded event, before detector-specific columns."""
-
-    filename: str
-    file_path: str
-    event: str
-    peak_s: float
-    score: float
-
-
 class ClipRow(TypedDict):
     filename: str
     file_path: str
-    detector: str
+    detector: DetectorName
     scan_mode: str
     duration_s: float
     inspected_s: float
     events: int
 
 
-ScanResult = tuple[list[EventRow], ClipRow]
-Detector = SpeedbreakerDetector | WarningSignDetector
+ScanResult = tuple[Sequence[Detection], ClipRow]
+DETECTORS: dict[str, type[Detector[Any]]] = {
+    detector.name: detector for detector in (SpeedbreakerDetector, WarningSignDetector)
+}
 
 
 class AnalysisRun:
-    detectors: dict[DetectorName, type[Detector]] = {
-        SpeedbreakerDetector.name: SpeedbreakerDetector,
-        WarningSignDetector.name: WarningSignDetector,
-    }
-    event_fields = ["encounter_id", "filename", "file_path", *dict.fromkeys(
-        field.name for detector in detectors.values() for field in fields(detector.result_type)
-    )]
     clip_fields = ["filename", "file_path", "detector", "scan_mode", "duration_s", "inspected_s", "events"]
 
-    def __init__(self, names: Sequence[DetectorName], scan_mode: str = "full", sign_lookback: float | None = None,
-                 *, motion_cache: MotionCache | None = None, hwaccel: str | None = None):
-        self.scan_mode = scan_mode
-        self.sign_lookback = sign_lookback
-        if sign_lookback is not None:
-            names = sorted(names, key=lambda name: name != DetectorName.SPEEDBREAKER)
-        self.selected: list[Detector] = []
-        for name in names:
-            detector_type = self.detectors[name]
-            if issubclass(detector_type, SpeedbreakerDetector):
-                self.selected.append(detector_type(scan_mode, motion_cache=motion_cache, hwaccel=hwaccel))
-            else:
-                self.selected.append(detector_type())
-
-    @staticmethod
-    def record(video: Path, detector: DetectorName, mode: str, duration: float, inspected: float,
-               detections: Iterable[Detection]) -> ScanResult:
-        file_path = str(video.resolve())
-        events = [cast(EventRow, dict(filename=video.name, file_path=file_path, **asdict(item)))
-                  for item in detections]
-        clip = ClipRow(filename=video.name, file_path=file_path, detector=str(detector), scan_mode=mode,
-                       duration_s=round(duration, 3), inspected_s=round(inspected, 3), events=len(events))
-        return events, clip
+    def __init__(self, names: Sequence[DetectorName], options: DetectorOptions = DetectorOptions()):
+        self.output = options.output
+        configured = {factory.name: factory(options) for factory in DETECTORS.values()}
+        result_fields = (field.name for detector in configured.values() for field in fields(detector.result_type))
+        self.event_fields = list(dict.fromkeys(["encounter_id", "filename", "file_path", *result_fields]))
+        order = TopologicalSorter({name: configured[name].dependencies for name in names})
+        self.selected = [configured[name] for name in order.static_order()]
+        self.inactive = [detector for name, detector in configured.items() if name not in names]
 
     def run_detectors(self, video: ProcessedVideo) -> list[ScanResult]:
         results = []
-        crossings = []
+        previous: dict[DetectorName, Sequence[Detection]] = {}
         for detector in self.selected:
-            mode = self.scan_mode if detector.name == DetectorName.SPEEDBREAKER else "full"
-            if isinstance(detector, WarningSignDetector) and self.sign_lookback is not None:
-                windows = detector.approaches(crossings, video.duration, self.sign_lookback)
-                events, inspected = detector.detect(video, windows)
-                mode = f"approach-{self.sign_lookback:g}s"
-            else:
-                events, inspected = detector.detect(video)
-            if detector.name == DetectorName.SPEEDBREAKER:
-                crossings = events
-            results.append(self.record(video.path, detector.name, mode, video.duration, inspected, events))
+            events, inspected = detector.detect(video, previous)
+            previous[detector.name] = events
+            clip = ClipRow(filename=video.path.name, file_path=str(video.path.resolve()), detector=detector.name,
+                           scan_mode=detector.scan_mode, duration_s=round(video.duration, 3),
+                           inspected_s=round(inspected, 3), events=len(events))
+            results.append((events, clip))
         return results
 
     def _scan_video(self, video: ProcessedVideo) -> list[ScanResult] | None:
@@ -116,33 +78,25 @@ class AnalysisRun:
         return [result for result in results if result is not None]
 
     @staticmethod
-    def assign_ids(events: Sequence[EventRow], clips: Sequence[ClipRow]):
-        durations = {row["file_path"]: row["duration_s"] for row in clips}
-        previous = None
-        next_id = 0
-        for event in sorted(events, key=lambda e: (e["file_path"], e["peak_s"], e["event"])):
-            shared_id = None
-            if event["event"] == DetectorName.SPEEDBREAKER and previous is not None:
-                prev_path, path = Path(previous["file_path"]), Path(event["file_path"])
-                if (prev_path != path and prev_path.parent == path.parent and event["peak_s"] <= 2.5
-                        and durations[str(prev_path)] - previous["peak_s"] <= 2.5):
-                    try:
-                        prev_start, start = [datetime.strptime(p.stem[:16], "%Y_%m%d_%H%M%S")
-                                             for p in (prev_path, path)]
-                    except ValueError:
-                        pass
-                    else:
-                        seam_gap = (start - prev_start).total_seconds() - durations[str(prev_path)]
-                        gap = (start - prev_start).total_seconds() + event["peak_s"] - previous["peak_s"]
-                        if abs(seam_gap) <= 1 and 0 <= gap <= 2.5:
-                            shared_id = previous["encounter_id"]
-            if shared_id is not None:
-                event["encounter_id"] = shared_id
+    def assign_ids(events: Sequence[EventRow], clips: Sequence[ClipRow],
+                   owners: Iterable[type[Detector[Any]]] | None = None) -> list[EventRow]:
+        if owners is None:
+            owners = (DETECTORS.get(row["event"], Detector) for row in events)
+        entries = sorted(zip(events, owners, strict=True),
+                         key=lambda entry: (entry[0]["file_path"], entry[0]["peak_s"], entry[0]["event"]))
+        durations = {clip["file_path"]: clip["duration_s"] for clip in clips}
+        previous: dict[type[Detector[Any]], tuple[EventRow, int]] = {}
+        next_id = 1
+        for event, owner in entries:
+            last = previous.get(owner)
+            if last and owner.continues_encounter(last[0], event, durations[last[0]["file_path"]]):
+                encounter_id = last[1]
             else:
+                encounter_id = next_id
                 next_id += 1
-                event["encounter_id"] = next_id
-            if event["event"] == DetectorName.SPEEDBREAKER:
-                previous = event
+            event["encounter_id"] = encounter_id
+            previous[owner] = event, encounter_id
+        return [event for event, _ in entries]
 
     @staticmethod
     def write_table(path: Path, fields: Collection[str], rows: Iterable[Mapping[str, object]]):
@@ -154,31 +108,46 @@ class AnalysisRun:
             writer.writerows(rows)
         os.replace(f.name, path)
 
-    @classmethod
-    def collect_results(cls, results: Iterable[list[ScanResult]]) -> tuple[list[EventRow], list[ClipRow]]:
-        events, clips = [], []
-        for per_video in results:
-            for found, clip in per_video:
-                events.extend(found)
-                clips.append(clip)
-        cls.assign_ids(events, clips)
-        events.sort(key=lambda e: (e["file_path"], e["peak_s"], e["event"]))
-        return events, clips
+    def write_detector_outputs(self, by_detector: Mapping[DetectorName, list[Detection]]):
+        for detector in self.selected:
+            events = by_detector[detector.name]
+            for event in events:
+                detector.event_output(event)
+            detector.final_output(events)
+        for detector in self.inactive:
+            detector.clear_output()
 
-    @classmethod
-    def save(cls, events: Sequence[EventRow], clips: Sequence[ClipRow], output: Path):
-        cls.write_table(output, cls.event_fields, events)
-        cls.write_table(output.with_suffix(".clips.csv"), cls.clip_fields, clips)
+    def save_results(self, results: Iterable[list[ScanResult]]) -> tuple[list[EventRow], list[ClipRow]]:
+        clips = []
+        by_detector: dict[DetectorName, list[Detection]] = {detector.name: [] for detector in self.selected}
+        for per_video in results:
+            for events, clip in per_video:
+                clips.append(clip)
+                by_detector[clip["detector"]].extend(events)
+        rows = []
+        owners = []
+        for detector in self.selected:
+            found = by_detector[detector.name]
+            found.sort(key=lambda event: (str(event.file_path), event.peak_s, event.event))
+            for event in found:
+                owners.append(type(detector))
+                rows.append(event.as_row())
+        rows = self.assign_ids(rows, clips, owners)
+        self.write_table(self.output, self.event_fields, rows)
+        self.write_table(self.output.with_suffix(".clips.csv"), self.clip_fields, clips)
+
+        self.write_detector_outputs(by_detector)
+        return rows, clips
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Find events in a list or folder of Viofo front-camera MP4s.")
     p.add_argument("inputs", type=Path, nargs="+", help="Front MP4s, or folders containing them")
-    available = ", ".join(AnalysisRun.detectors)
+    available = ", ".join(DETECTORS)
     p.add_argument("--detect", default=DetectorName.SPEEDBREAKER.value, help=f"Comma-separated: {available}")
     # Accept the explicit full mode used by earlier CLI commands.
     p.add_argument("--scan-mode", choices=("full",), help=argparse.SUPPRESS)
-    p.add_argument("--output", type=Path, default=Path("analysis/speedbreaker/detections.csv"))
+    p.add_argument("--output", type=Path, default=DetectorOptions.output)
     p.add_argument("--workers", type=int,
                    help="Maximum parallel clips in each stage (default: automatic for preprocessing, 2 for detection)")
     p.add_argument("--work-dir", type=Path, default=DEFAULT_WORK_DIR,
@@ -195,9 +164,9 @@ def build_parser() -> argparse.ArgumentParser:
 def build_args(parser: argparse.ArgumentParser, argv: Sequence[str] | None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     requested = list(dict.fromkeys(n.strip() for n in args.detect.split(",")))
-    unknown = set(requested) - AnalysisRun.detectors.keys()
+    unknown = set(requested) - DETECTORS.keys()
     if unknown:
-        parser.error(f"Unknown detector(s): {', '.join(sorted(unknown))}. Available: {', '.join(AnalysisRun.detectors)}")
+        parser.error(f"Unknown detector(s): {', '.join(sorted(unknown))}. Available: {', '.join(DETECTORS)}")
     args.detect = [DetectorName(name) for name in requested]
     if args.sign_lookback is not None:
         required = {DetectorName.SPEEDBREAKER, DetectorName.WARNING_SIGN}
@@ -246,15 +215,15 @@ def main(argv: Sequence[str] | None = None):
     processed = preprocess_videos(videos, args)
     motion_folder = args.motion_cache or args.work_dir / "motion" / (args.hwaccel or "cpu")
     motion_cache = MotionCache(motion_folder, reuse=args.motion_cache is not None or args.preprocess_cache)
-    run = AnalysisRun(args.detect, sign_lookback=args.sign_lookback, motion_cache=motion_cache, hwaccel=args.hwaccel)
+    options = DetectorOptions(output=args.output, sign_lookback=args.sign_lookback,
+                              motion_cache=motion_cache, hwaccel=args.hwaccel)
+    run = AnalysisRun(args.detect, options)
     workers = min(len(processed), args.workers or 2)
     logger.info("Running detectors (workers=%d)", workers)
     results = run.scan_videos(processed, workers)
 
-    events, clips = run.collect_results(results)
     logger.info("Saving results to %s", args.output)
-    run.save(events, clips, args.output)
-    SpeedbreakerCompilation.compile_output(args.output)
+    events, clips = run.save_results(results)
     if args.review:
         from visualize.review import ReviewPage
         logger.info("Writing review page to %s", args.review)

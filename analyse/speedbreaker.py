@@ -2,16 +2,21 @@
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from functools import reduce
+from hashlib import sha256
+from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy.ndimage import gaussian_filter1d, maximum_filter1d, median_filter, minimum_filter1d
 from scipy.signal import find_peaks
 
-from .common import Detection, DetectorName
+from .common import Detection, DetectorName, EventRow
+from .compilation import SpeedbreakerCompilation
+from .detector import Detector, DetectorOptions, PriorDetections
 from .preprocess import ProcessedVideo
-from .signals import CameraMotion, GpsTrace, MotionCache, ScanWindows
+from .signals import CameraMotion, GpsTrace, ScanWindows
 
 
 PRE_ROLL_S = 2.0
@@ -28,7 +33,7 @@ class SpeedbreakerDetection(Detection):
     buffered_end_s: float
 
 
-class SpeedbreakerDetector:
+class SpeedbreakerDetector(Detector[SpeedbreakerDetection]):
     name = DetectorName.SPEEDBREAKER
     result_type = SpeedbreakerDetection
     # Lowest threshold tied for best event-level F2 on the guide clips.
@@ -57,10 +62,10 @@ class SpeedbreakerDetector:
     missing_gps_prior = 0.40
     missing_crossing_brake_prior = 0.20
 
-    def __init__(self, scan_mode: str = "full", *, motion_cache: MotionCache | None = None, hwaccel: str | None = None):
-        self.scan_mode = scan_mode
-        self.read_motion = motion_cache.read if motion_cache else CameraMotion.read
-        self.hwaccel = hwaccel
+    def __init__(self, options: DetectorOptions = DetectorOptions()):
+        super().__init__(options)
+        self.scan_mode = options.scan_mode
+        self.read_motion = options.motion_cache.read if options.motion_cache else CameraMotion.read
 
     @classmethod
     def measure(cls, motion: NDArray[np.float64], gps: GpsTrace) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
@@ -136,11 +141,11 @@ class SpeedbreakerDetector:
                 kept.append(event)
         return sorted(kept, key=lambda event: event.peak_s)
 
-    def detect(self, video: ProcessedVideo) -> tuple[list[SpeedbreakerDetection], float]:
+    def _detect(self, video: ProcessedVideo, previous: PriorDetections) -> tuple[list[SpeedbreakerDetection], float]:
         gps = video.gps_trace
         if not np.any((gps.seconds >= 0) & (gps.seconds <= video.duration)):
             raise ValueError(f"{video.path.name}: speedbreaker requires GPS speed samples aligned to the clip")
-        motion = self.read_motion(video.path, hwaccel=self.hwaccel, duration=video.duration)
+        motion = self.read_motion(video.path, hwaccel=self.options.hwaccel, duration=video.duration)
         if len(motion) < self.min_motion_samples:
             raise ValueError(f"{video.path.name}: speedbreaker requires at least {self.min_motion_samples} camera-motion samples")
         if self.scan_mode == "full":
@@ -148,3 +153,41 @@ class SpeedbreakerDetector:
         windows = ScanWindows.guided(gps, video.duration)
         chunks = (motion[(motion[:, 0] >= a) & (motion[:, 0] < b)] for a, b in windows)
         return self.score_windows(chunks, gps, video.duration), sum(b - a for a, b in windows)
+
+    @staticmethod
+    def continues_encounter(previous: EventRow, current: EventRow, previous_duration: float) -> bool:
+        before, after = Path(previous["file_path"]), Path(current["file_path"])
+        if (before == after or before.parent != after.parent or current["peak_s"] > 2.5
+                or previous_duration - previous["peak_s"] > 2.5):
+            return False
+        try:
+            starts = [datetime.strptime(path.stem[:16], "%Y_%m%d_%H%M%S") for path in (before, after)]
+        except ValueError:
+            return False
+        elapsed = (starts[1] - starts[0]).total_seconds()
+        return abs(elapsed - previous_duration) <= 1 and 0 <= elapsed + current["peak_s"] - previous["peak_s"] <= 2.5
+
+    def clip_path(self, event: SpeedbreakerDetection) -> Path:
+        # Recordings from separate folders can share the same camera filename.
+        source_id = sha256(str(event.file_path).encode()).hexdigest()[:12]
+        name = f"crossing-{event.file_path.stem}-{event.peak_s:.2f}s-{source_id}.mp4"
+        return self.options.output.with_suffix(".speedbreakers") / name
+
+    def event_output(self, event: SpeedbreakerDetection):
+        SpeedbreakerCompilation.write_clip(event.file_path, event.buffered_start_s, event.buffered_end_s,
+                                           self.clip_path(event))
+
+    def final_output(self, events: list[SpeedbreakerDetection]):
+        clips = [self.clip_path(event) for event in events]
+        compilation = self.options.output.with_suffix(".speedbreakers.mp4")
+        if clips:
+            SpeedbreakerCompilation.join(clips, compilation)
+        else:
+            compilation.unlink(missing_ok=True)
+        folder = self.options.output.with_suffix(".speedbreakers")
+        clip_pattern = "crossing-*-*s-" + "[0-9a-f]" * 12 + ".mp4"
+        for stale in set(folder.glob(clip_pattern)).difference(clips):
+            stale.unlink()
+
+    def clear_output(self):
+        self.final_output([])

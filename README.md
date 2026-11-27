@@ -70,6 +70,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 6. Open `analysis/speedbreaker/` inside the project to see your results.
 
    - Play `detections.speedbreakers.mp4` to watch the crossings in sequence. This video appears when the tool finds a crossing.
+   - Open `detections.speedbreakers/` to play one crossing at a time. Each MP4 includes the buffered interval listed in the CSV.
    - Open `detections.csv` to find a crossing in the original footage. Play the clip named in `filename` and jump to `peak_s` seconds from its start.
    - Open `detections.clips.csv` to see how many crossings each clip had, including zero.
 
