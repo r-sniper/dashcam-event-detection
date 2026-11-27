@@ -83,10 +83,6 @@ uv run analyze.py videos/sample --detect speedbreaker,warning_sign
 
 Add `--review review.html` for a clickable event list. Run `uv run analyze.py --help` for all options.
 
-## Contributing
-
-Submit every change through a pull request. Describe what changed and how you tested it. Every pull request requires approval from [Rahul Shah (@r-sniper)](https://github.com/r-sniper) before it can be merged.
-
 ## License and citation
 
 This project uses the [MIT License](LICENSE). If you use it in published work, please cite the software.
