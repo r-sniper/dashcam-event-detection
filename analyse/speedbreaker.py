@@ -31,7 +31,7 @@ class SpeedbreakerDetection(Detection):
 class SpeedbreakerDetector:
     name = DetectorName.SPEEDBREAKER
     result_type = SpeedbreakerDetection
-    # Lowest threshold tied for best event-level F2 on the 13 November guide clips.
+    # Lowest threshold tied for best event-level F2 on the guide clips.
     threshold = 1.95
     separation_s = 5
     min_motion_samples = 3
