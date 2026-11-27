@@ -6,7 +6,7 @@ from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
-from unittest.mock import call, patch
+from unittest.mock import ANY, call, patch
 
 import numpy as np
 from tqdm.contrib.concurrent import thread_map
@@ -86,8 +86,8 @@ class PreprocessingTests(unittest.TestCase):
                   patch.object(WarningSignDetector, "detect", return_value=([], 10.)) as signs):
                 main([str(root), str(video), "--detect", "speedbreaker,warning_sign", "--output", str(root / "events.csv")])
             preprocess.assert_called_once_with(video.resolve())
-            crossings.assert_called_once_with(processed)
-            signs.assert_called_once_with(processed)
+            crossings.assert_called_once_with(processed, ANY)
+            signs.assert_called_once_with(processed, ANY)
 
     def test_refresh_reuse_and_source_change(self):
         with TemporaryDirectory() as directory:

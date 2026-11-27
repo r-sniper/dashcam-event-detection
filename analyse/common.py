@@ -1,7 +1,8 @@
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import NotRequired, TypedDict, cast
 
 
 class DetectorName(str, Enum):
@@ -14,6 +15,20 @@ class DetectorName(str, Enum):
 
 @dataclass
 class Detection:
+    event: str
+    peak_s: float
+    score: float
+    # Detector.detect attaches the source to each event returned by the measurement algorithm.
+    file_path: Path = field(init=False, repr=False, compare=False)
+
+    def as_row(self) -> "EventRow":
+        return cast(EventRow, {**asdict(self), "filename": self.file_path.name, "file_path": str(self.file_path)})
+
+
+class EventRow(TypedDict):
+    encounter_id: NotRequired[int]
+    filename: str
+    file_path: str
     event: str
     peak_s: float
     score: float
