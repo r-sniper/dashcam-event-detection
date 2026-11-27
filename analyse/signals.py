@@ -84,7 +84,7 @@ class CameraMotion:
             frames = cast(BinaryIO, process.stdout)
             frame_data = iter(partial(frames.read, cls.height * cls.width), b"")
             for data in tqdm(frame_data, total=total_frames, desc=f"  Motion {video.name}",
-                             unit="frame", leave=False, file=sys.stdout, disable=None):
+                             unit="frame", leave=True, file=sys.stdout, disable=None):
                 frame = np.frombuffer(data, np.uint8).reshape(cls.height, cls.width)
                 current = frame[int(cls.height * .12):int(cls.height * .71)]
                 if previous is not None:
