@@ -22,6 +22,7 @@ from tqdm.auto import tqdm
 class GpsTrace:
     seconds: NDArray[np.float64]
     speed: NDArray[np.float64]
+    max_fix_distance_s = 2
 
     def at(self, seconds: float | NDArray[np.float64]) -> NDArray[np.float64]:
         if not self.seconds.size:
@@ -31,7 +32,7 @@ class GpsTrace:
         right = np.clip(np.searchsorted(self.seconds, seconds), 0, len(self.seconds) - 1)
         left = np.maximum(right - 1, 0)
         nearest = np.minimum(abs(seconds - self.seconds[right]), abs(seconds - self.seconds[left]))
-        return np.where(nearest <= 2, speed, np.nan)
+        return np.where(nearest <= self.max_fix_distance_s, speed, np.nan)
 
 
 class CameraMotion:
@@ -40,25 +41,29 @@ class CameraMotion:
     width = 320
     height = 180
     fps = 10
+    crop_top_fraction = 0.12
+    crop_bottom_fraction = 0.71
+    min_feature_points = 8
+    max_tracking_error = 30
 
     @classmethod
     def measure(cls, previous: NDArray[np.uint8], current: NDArray[np.uint8]) -> list[float]:
         points = cv2.goodFeaturesToTrack(previous, maxCorners=140, qualityLevel=0.01,
                                          minDistance=7, blockSize=5)
-        if points is None or len(points) < 8:
+        if points is None or len(points) < cls.min_feature_points:
             return [0., 0., 0.]
         tracked, status, errors = cv2.calcOpticalFlowPyrLK(
             previous, current, points, np.empty_like(points), winSize=(17, 17), maxLevel=2)
-        keep = (status.ravel() == 1) & (errors.ravel() < 30)
+        keep = (status.ravel() == 1) & (errors.ravel() < cls.max_tracking_error)
         a, b = points[keep, 0], tracked[keep, 0]
-        if len(a) < 8:
+        if len(a) < cls.min_feature_points:
             return [0., 0., 0.]
         matrix, inliers = cv2.estimateAffinePartial2D(a, b, method=cv2.RANSAC,
                                                      ransacReprojThreshold=1.8, maxIters=150)
         if matrix is None:
             return [0., 0., 0.]
-        # Coordinates are relative to the crop. Evaluate near the road vanishing point.
-        x, y = cls.width / 2, cls.height * .50 - int(cls.height * .12)
+        # Approximate the road vanishing point with the frame center in crop coordinates.
+        x, y = cls.width / 2, cls.height / 2 - int(cls.height * cls.crop_top_fraction)
         dy = matrix[1] @ [x, y, 1] - y
         return [dy, matrix[1, 0] * cls.width / 2, inliers.mean()]
 
@@ -86,7 +91,7 @@ class CameraMotion:
             for data in tqdm(frame_data, total=total_frames, desc=f"  Motion {video.name}",
                              unit="frame", leave=True, file=sys.stdout, disable=None):
                 frame = np.frombuffer(data, np.uint8).reshape(cls.height, cls.width)
-                current = frame[int(cls.height * .12):int(cls.height * .71)]
+                current = frame[int(cls.height * cls.crop_top_fraction):int(cls.height * cls.crop_bottom_fraction)]
                 if previous is not None:
                     motion.append(cls.measure(previous, current))
                 previous = current
@@ -99,26 +104,36 @@ class CameraMotion:
 class ScanWindows:
     """In fast mode inspect GPS troughs, clip boundaries and gaps in GPS coverage."""
 
-    @staticmethod
-    def guided(gps: GpsTrace, duration: float) -> list[tuple[float, float]]:
+    speed_median_samples = 3
+    min_trough_prominence_kmh = 4
+    min_trough_separation_s = 4
+    max_trough_speed_kmh = 36
+    trough_lead_s = 9
+    trough_tail_s = 5
+    outage_margin_s = 3
+
+    @classmethod
+    def guided(cls, gps: GpsTrace, duration: float) -> list[tuple[float, float]]:
         seconds = np.arange(int(np.ceil(duration)), dtype=np.float64)
         speeds = gps.at(seconds)
         known = np.isfinite(speeds)
         if not known.any():
             return [(0., duration)]
         # Median filtering removes isolated zero-speed GPS fixes.
-        smooth = median_filter(np.interp(seconds, seconds[known], speeds[known]), 3, mode="nearest")
-        troughs, _ = find_peaks(-smooth, prominence=4, distance=4)
-        centers = [int(i) for i in troughs if smooth[i] <= 36]
+        interpolated = np.interp(seconds, seconds[known], speeds[known])
+        smooth = median_filter(interpolated, cls.speed_median_samples, mode="nearest")
+        troughs, _ = find_peaks(-smooth, prominence=cls.min_trough_prominence_kmh,
+                                distance=cls.min_trough_separation_s)
+        centers = [int(i) for i in troughs if smooth[i] <= cls.max_trough_speed_kmh]
         for i in [0, len(seconds) - 1]:
-            if smooth[i] <= 36:
+            if smooth[i] <= cls.max_trough_speed_kmh:
                 centers.append(i)
         keep = ~known
         for i in centers:
-            keep[max(0, i - 9):i + 5] = True
+            keep[max(0, i - cls.trough_lead_s):i + cls.trough_tail_s] = True
         # Add context at the margins of each outage.
-        for i in np.flatnonzero(np.diff(known.astype(int))):
-            keep[max(0, i - 2):i + 4] = True
+        for boundary in np.flatnonzero(np.diff(known.astype(int))) + 1:
+            keep[max(0, boundary - cls.outage_margin_s):boundary + cls.outage_margin_s] = True
         edges = np.diff(np.r_[False, keep, False].astype(int))
         return [(float(a), min(float(b), duration))
                 for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1))]
